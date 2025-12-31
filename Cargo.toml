@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "kernel",
+    "user",
+]
+resolver = "3"

@@ -1,3 +1,3 @@
-# microgravity OS
+# Zed OS
 
-A Linux-compatible operating system built with Google's Antigravity IDE.
+An operating system built with the Zed Editor.

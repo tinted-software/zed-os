@@ -1,0 +1,10 @@
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+[target.aarch64-unknown-none-softfloat]
+runner = "qemu-system-aarch64 -accel tcg -M virt,highmem=off -cpu cortex-a57 -smp 4 -m 2G -nographic -drive file=disk.img,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -kernel"
+
+
+[alias]
+kbuild = "build --package kernel"
+krun = "run --package kernel"
