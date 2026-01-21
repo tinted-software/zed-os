@@ -1,0 +1,16 @@
+[package]
+name = "vfdecrypt-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
+anyhow = "1.0.100"
+thiserror = "2.0.18"
+aes = "0.8.4"
+hmac = "0.12.1"
+sha1 = "0.10.6"
+pbkdf2 = "0.12.2"
+des = "0.8.1"
+cbc = { version = "0.1.2", features = ["alloc"] }
+cipher = { version = "0.4.4", features = ["block-padding"] }

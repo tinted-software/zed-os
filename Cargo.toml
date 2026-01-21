@@ -1,6 +1,20 @@
 [workspace]
-members = [
-    "kernel",
-    "user",
-]
 resolver = "3"
+members = [
+    "libs/ipsw-downloader",
+    "tools/vfdecrypt",
+    "tools/installer",
+    "kernel",
+]
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.ipsw-downloader]
+opt-level = 1
+
+[profile.dev.package.vfdecrypt-rs]
+opt-level = 1
+
+[profile.dev.package.zedos-installer]
+opt-level = 1
