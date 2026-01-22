@@ -1,6 +1,5 @@
 target/
 *.img
 *.log
-/buck-out
 rust-project.json
 compile_commands.json

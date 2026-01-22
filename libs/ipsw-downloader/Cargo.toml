@@ -1,0 +1,13 @@
+[package]
+name = "ipsw-downloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { workspace = true }
+plist = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
