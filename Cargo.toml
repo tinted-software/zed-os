@@ -1,23 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "libs/ipsw-downloader",
-    "tools/vfdecrypt",
-    "tools/installer",
+    "libs/*",
+    "tools/ipsw",
     "kernel",
 ]
-
-[profile.dev.package."*"]
-opt-level = 2
-
-[profile.dev.package.ipsw-downloader]
-opt-level = 1
-
-[profile.dev.package.vfdecrypt-rs]
-opt-level = 1
-
-[profile.dev.package.zedos-installer]
-opt-level = 1
 
 [profile.dev]
 panic = "abort"
@@ -27,8 +14,7 @@ panic = "abort"
 
 [workspace.dependencies]
 thiserror = { version = "2.0.18", default-features = false }
-# reqwest = { version = "0.13.1", default-features = false, features = ["rustls", "stream"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["rustls", "stream"] }
 goblin = { version = "0.10.4", default-features = false, features = [
     "elf64",
     "endian_fd",
@@ -42,6 +28,11 @@ spin = "0.10.0"
 plist = "1.8.0"
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false }
-
-gpui = { git = "https://github.com/zed-industries/zed", version = "0.2.2", default-features = false }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", version = "0.5.0" }
+clap = { version = "4.5.54", features = ["derive"] }
+aes = "0.8.4"
+hmac = "0.12.1"
+sha1 = "0.10.6"
+pbkdf2 = "0.12.2"
+des = "0.8.1"
+cbc = { version = "0.1.2", features = ["alloc"] }
+cipher = { version = "0.4.4", features = ["block-padding"] }

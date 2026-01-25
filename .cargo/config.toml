@@ -1,12 +1,23 @@
-# [unstable]
-# codegen-backend = true
+#[unstable]
+#codegen-backend = true
 
-# [profile.dev]
-# codegen-backend = "cranelift"
+#[profile.dev]
+#codegen-backend = "cranelift"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=pic",
+    "-C", "code-model=kernel",
+    "-C", "link-arg=-zmax-page-size=0x1000",
+    "-C", "link-arg=-zstack-protector",
+    "-C", "link-arg=-zrelro",
+    "-C", "link-arg=-znow",
+    "-C", "sanitizer=kcfi",
+]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
 
 [target.aarch64-unknown-none-softfloat]
 runner = "qemu-system-aarch64 -accel tcg,thread=multi -M virt,highmem=off -cpu cortex-a57 -smp 4 -m 2G -nographic -drive file=disk.img,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -kernel"
-
-[alias]
-kbuild = "build --package zedos-kernel --target aarch64-unknown-none-softfloat"
-krun = "run --package zedos-kernel --target aarch64-unknown-none-softfloat"

@@ -1,20 +1,11 @@
 //! Virtio-blk driver using PCI transport for QEMU virt machine
 
-use crate::kprintln;
-use alloc::vec::Vec;
+use crate::tarfs::BlockReader;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
-use crate::tarfs::BlockReader;
 use spin::Mutex;
-
-/// Clean cache line to point of coherency (for DMA)
-#[inline(always)]
-fn cache_clean(addr: usize) {
-    unsafe {
-        asm!("dc cvac, {}", in(reg) addr, options(nostack, preserves_flags));
-    }
-}
 
 /// Clean cache range for DMA
 fn cache_clean_range(addr: usize, len: usize) {
@@ -59,12 +50,8 @@ const PCI_CAP_PTR: usize = 0x34;
 // Virtio PCI capability types
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
-const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
-const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 // Virtio PCI common configuration offsets
-const VIRTIO_PCI_COMMON_DFSELECT: usize = 0x00;
-const VIRTIO_PCI_COMMON_DF: usize = 0x04;
 const VIRTIO_PCI_COMMON_GFSELECT: usize = 0x08;
 const VIRTIO_PCI_COMMON_GF: usize = 0x0c;
 const VIRTIO_PCI_COMMON_STATUS: usize = 0x14;
@@ -73,11 +60,8 @@ const VIRTIO_PCI_COMMON_Q_SIZE: usize = 0x18;
 const VIRTIO_PCI_COMMON_Q_NOTIFY_OFF: usize = 0x1e;
 const VIRTIO_PCI_COMMON_Q_ENABLE: usize = 0x1c;
 const VIRTIO_PCI_COMMON_Q_DESCLO: usize = 0x20;
-const VIRTIO_PCI_COMMON_Q_DESCHI: usize = 0x24;
 const VIRTIO_PCI_COMMON_Q_AVAILLO: usize = 0x28;
-const VIRTIO_PCI_COMMON_Q_AVAILHI: usize = 0x2c;
 const VIRTIO_PCI_COMMON_Q_USEDLO: usize = 0x30;
-const VIRTIO_PCI_COMMON_Q_USEDHI: usize = 0x34;
 
 // Virtio feature bits
 const VIRTIO_F_VERSION_1: u32 = 1 << 0;
@@ -93,7 +77,6 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 const QUEUE_SIZE: usize = 16;
-const SECTOR_SIZE: usize = 512;
 
 const VIRTIO_VENDOR_ID: u16 = 0x1af4;
 const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001;
@@ -135,7 +118,6 @@ struct VirtioBlkReq {
 }
 
 pub struct VirtioBlk {
-    common_cfg: usize,
     notify_addr: usize,
     desc: *mut VirtqDesc,
     avail: *mut VirtqAvail,
@@ -149,7 +131,11 @@ pub struct VirtioBlk {
 unsafe impl Send for VirtioBlk {}
 
 fn pci_config_addr(bus: u8, dev: u8, func: u8, offset: usize) -> usize {
-    PCI_ECAM_BASE + ((bus as usize) << 20) + ((dev as usize) << 15) + ((func as usize) << 12) + offset
+    PCI_ECAM_BASE
+        + ((bus as usize) << 20)
+        + ((dev as usize) << 15)
+        + ((func as usize) << 12)
+        + offset
 }
 
 fn pci_read16(bus: u8, dev: u8, func: u8, offset: usize) -> u16 {
@@ -182,10 +168,18 @@ struct VirtioCaps {
 
 fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
     let status = pci_read16(bus, dev, func, PCI_STATUS);
-    if (status & 0x10) == 0 { return None; }
+    if (status & 0x10) == 0 {
+        return None;
+    }
 
     let mut cap_ptr = pci_read8(bus, dev, func, PCI_CAP_PTR) as usize;
-    let mut caps = VirtioCaps { common_cfg_bar: 0, common_cfg_offset: 0, notify_bar: 0, notify_offset: 0, notify_off_mult: 0 };
+    let mut caps = VirtioCaps {
+        common_cfg_bar: 0,
+        common_cfg_offset: 0,
+        notify_bar: 0,
+        notify_offset: 0,
+        notify_off_mult: 0,
+    };
 
     while cap_ptr != 0 {
         let cap_id = pci_read8(bus, dev, func, cap_ptr);
@@ -194,8 +188,15 @@ fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
             let bar = pci_read8(bus, dev, func, cap_ptr + 4);
             let offset = pci_read32(bus, dev, func, cap_ptr + 8);
             match cfg_type {
-                VIRTIO_PCI_CAP_COMMON_CFG => { caps.common_cfg_bar = bar; caps.common_cfg_offset = offset; }
-                VIRTIO_PCI_CAP_NOTIFY_CFG => { caps.notify_bar = bar; caps.notify_offset = offset; caps.notify_off_mult = pci_read32(bus, dev, func, cap_ptr + 16); }
+                VIRTIO_PCI_CAP_COMMON_CFG => {
+                    caps.common_cfg_bar = bar;
+                    caps.common_cfg_offset = offset;
+                }
+                VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                    caps.notify_bar = bar;
+                    caps.notify_offset = offset;
+                    caps.notify_off_mult = pci_read32(bus, dev, func, cap_ptr + 16);
+                }
                 _ => {}
             }
         }
@@ -209,10 +210,14 @@ static mut PCI_MMIO_ALLOC_NEXT: u32 = 0x1000_0000;
 fn pci_assign_bar(bus: u8, dev: u8, func: u8, bar_num: u8) -> u32 {
     let bar_offset = PCI_BAR0 + (bar_num as usize) * 4;
     let current = pci_read32(bus, dev, func, bar_offset);
-    if (current & !0xF) != 0 { return current & !0xF; }
+    if (current & !0xF) != 0 {
+        return current & !0xF;
+    }
     pci_write32(bus, dev, func, bar_offset, 0xFFFFFFFF);
     let size_mask = pci_read32(bus, dev, func, bar_offset);
-    if size_mask == 0 || size_mask == 0xFFFFFFFF { return 0; }
+    if size_mask == 0 || size_mask == 0xFFFFFFFF {
+        return 0;
+    }
     let size = !(size_mask & !0xF) + 1;
     unsafe {
         let aligned = (PCI_MMIO_ALLOC_NEXT + size - 1) & !(size - 1);
@@ -225,14 +230,20 @@ fn pci_assign_bar(bus: u8, dev: u8, func: u8, bar_num: u8) -> u32 {
 fn scan_pci() -> Option<(u8, u8, u8, VirtioCaps)> {
     for dev in 0..32 {
         let vendor = pci_read16(0, dev, 0, PCI_VENDOR_ID);
-        if vendor == 0xFFFF { continue; }
+        if vendor == 0xFFFF {
+            continue;
+        }
         let device = pci_read16(0, dev, 0, PCI_DEVICE_ID);
-        if vendor == VIRTIO_VENDOR_ID && (device == VIRTIO_BLK_DEVICE_ID_LEGACY || device == VIRTIO_BLK_DEVICE_ID_MODERN) {
+        if vendor == VIRTIO_VENDOR_ID
+            && (device == VIRTIO_BLK_DEVICE_ID_LEGACY || device == VIRTIO_BLK_DEVICE_ID_MODERN)
+        {
             let cmd = pci_read16(0, dev, 0, PCI_COMMAND);
             pci_write16(0, dev, 0, PCI_COMMAND, cmd | 0x06);
             if let Some(caps) = find_virtio_caps(0, dev, 0) {
                 pci_assign_bar(0, dev, 0, caps.common_cfg_bar);
-                if caps.notify_bar != caps.common_cfg_bar { pci_assign_bar(0, dev, 0, caps.notify_bar); }
+                if caps.notify_bar != caps.common_cfg_bar {
+                    pci_assign_bar(0, dev, 0, caps.notify_bar);
+                }
                 return Some((0, dev, 0, caps));
             }
         }
@@ -245,7 +256,9 @@ impl VirtioBlk {
         let (bus, dev, func, caps) = scan_pci()?;
         let bar_offset = PCI_BAR0 + (caps.common_cfg_bar as usize) * 4;
         let bar = pci_read32(bus, dev, func, bar_offset) & !0xF;
-        if bar == 0 { return None; }
+        if bar == 0 {
+            return None;
+        }
         let common_cfg = bar as usize + caps.common_cfg_offset as usize;
         let notify_cap_base = bar as usize + caps.notify_offset as usize;
 
@@ -256,13 +269,21 @@ impl VirtioBlk {
             status |= VIRTIO_STATUS_DRIVER;
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_STATUS) as *mut u8, status);
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_GFSELECT) as *mut u32, 1);
-            write_volatile((common_cfg + VIRTIO_PCI_COMMON_GF) as *mut u32, VIRTIO_F_VERSION_1);
+            write_volatile(
+                (common_cfg + VIRTIO_PCI_COMMON_GF) as *mut u32,
+                VIRTIO_F_VERSION_1,
+            );
             status |= VIRTIO_STATUS_FEATURES_OK;
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_STATUS) as *mut u8, status);
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_SELECT) as *mut u16, 0);
-            write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_SIZE) as *mut u16, QUEUE_SIZE as u16);
-            let queue_notify_off = read_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_NOTIFY_OFF) as *const u16);
-            let notify_addr = notify_cap_base + (queue_notify_off as usize) * (caps.notify_off_mult as usize);
+            write_volatile(
+                (common_cfg + VIRTIO_PCI_COMMON_Q_SIZE) as *mut u16,
+                QUEUE_SIZE as u16,
+            );
+            let queue_notify_off =
+                read_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_NOTIFY_OFF) as *const u16);
+            let notify_addr =
+                notify_cap_base + (queue_notify_off as usize) * (caps.notify_off_mult as usize);
 
             let desc_size = core::mem::size_of::<VirtqDesc>() * QUEUE_SIZE;
             let avail_size = core::mem::size_of::<VirtqAvail>();
@@ -277,19 +298,39 @@ impl VirtioBlk {
             let avail = (aligned + desc_size) as *mut VirtqAvail;
             let used = (aligned + desc_size + avail_size) as *mut VirtqUsed;
 
-            write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_DESCLO) as *mut u32, aligned as u32);
-            write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_AVAILLO) as *mut u32, (aligned + desc_size) as u32);
-            write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_USEDLO) as *mut u32, (aligned + desc_size + avail_size) as u32);
+            write_volatile(
+                (common_cfg + VIRTIO_PCI_COMMON_Q_DESCLO) as *mut u32,
+                aligned as u32,
+            );
+            write_volatile(
+                (common_cfg + VIRTIO_PCI_COMMON_Q_AVAILLO) as *mut u32,
+                (aligned + desc_size) as u32,
+            );
+            write_volatile(
+                (common_cfg + VIRTIO_PCI_COMMON_Q_USEDLO) as *mut u32,
+                (aligned + desc_size + avail_size) as u32,
+            );
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_Q_ENABLE) as *mut u16, 1);
             status |= VIRTIO_STATUS_DRIVER_OK;
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_STATUS) as *mut u8, status);
 
-            let req_layout = alloc::alloc::Layout::from_size_align(core::mem::size_of::<VirtioBlkReq>(), 16).unwrap();
+            let req_layout =
+                alloc::alloc::Layout::from_size_align(core::mem::size_of::<VirtioBlkReq>(), 16)
+                    .unwrap();
             let req_buf = alloc::alloc::alloc(req_layout) as *mut VirtioBlkReq;
             let status_layout = alloc::alloc::Layout::from_size_align(4, 4).unwrap();
             let status_buf = alloc::alloc::alloc(status_layout);
 
-            Some(Self { common_cfg, notify_addr, desc, avail, used, last_used_idx: 0, req_buf, status_buf, next_desc_idx: 0 })
+            Some(Self {
+                notify_addr,
+                desc,
+                avail,
+                used,
+                last_used_idx: 0,
+                req_buf,
+                status_buf,
+                next_desc_idx: 0,
+            })
         }
     }
 
@@ -300,17 +341,38 @@ impl VirtioBlk {
     }
 
     pub fn read_sectors(&mut self, sector: u64, buf: &mut [u8]) -> bool {
-        if buf.len() % 512 != 0 { return false; }
-        let req = VirtioBlkReq { req_type: VIRTIO_BLK_T_IN, reserved: 0, sector };
+        if !buf.len().is_multiple_of(512) {
+            return false;
+        }
+        let req = VirtioBlkReq {
+            req_type: VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        };
         unsafe {
             core::ptr::write(self.req_buf, req);
             *self.status_buf = 0xFF;
             let h = self.allocate_desc();
             let d = self.allocate_desc();
             let s = self.allocate_desc();
-            (*self.desc.add(h as usize)) = VirtqDesc { addr: self.req_buf as u64, len: core::mem::size_of::<VirtioBlkReq>() as u32, flags: VIRTQ_DESC_F_NEXT, next: d };
-            (*self.desc.add(d as usize)) = VirtqDesc { addr: buf.as_ptr() as u64, len: buf.len() as u32, flags: VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE, next: s };
-            (*self.desc.add(s as usize)) = VirtqDesc { addr: self.status_buf as u64, len: 1, flags: VIRTQ_DESC_F_WRITE, next: 0 };
+            (*self.desc.add(h as usize)) = VirtqDesc {
+                addr: self.req_buf as u64,
+                len: core::mem::size_of::<VirtioBlkReq>() as u32,
+                flags: VIRTQ_DESC_F_NEXT,
+                next: d,
+            };
+            (*self.desc.add(d as usize)) = VirtqDesc {
+                addr: buf.as_ptr() as u64,
+                len: buf.len() as u32,
+                flags: VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+                next: s,
+            };
+            (*self.desc.add(s as usize)) = VirtqDesc {
+                addr: self.status_buf as u64,
+                len: 1,
+                flags: VIRTQ_DESC_F_WRITE,
+                next: 0,
+            };
             cache_clean_range(self.req_buf as usize, 16);
             cache_clean_range(self.desc as usize, 512);
             cache_invalidate_range(buf.as_ptr() as usize, buf.len());
@@ -325,7 +387,9 @@ impl VirtioBlk {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 cache_invalidate_range(core::ptr::addr_of!((*self.used).idx) as usize, 2);
                 count += 1;
-                if count > 1000000 { return false; }
+                if count > 1000000 {
+                    return false;
+                }
             }
             self.last_used_idx = (*self.used).idx;
             cache_invalidate_range(buf.as_ptr() as usize, buf.len());
@@ -338,17 +402,21 @@ impl BlockReader for Mutex<VirtioBlk> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> bool {
         let mut blk = self.lock();
         let start_sector = offset / 512;
-        if offset % 512 == 0 && buf.len() % 512 == 0 {
+        if offset.is_multiple_of(512) && buf.len().is_multiple_of(512) {
             return blk.read_sectors(start_sector, buf);
         }
-        let end_sector = (offset + buf.len() as u64 + 511) / 512;
+        let end_sector = (offset + buf.len() as u64).div_ceil(512);
         let mut temp = vec![0u8; ((end_sector - start_sector) * 512) as usize];
         if blk.read_sectors(start_sector, &mut temp) {
             let off = (offset % 512) as usize;
             buf.copy_from_slice(&temp[off..off + buf.len()]);
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 }
 
-pub fn init() -> Option<VirtioBlk> { VirtioBlk::new() }
+pub fn init() -> Option<VirtioBlk> {
+    VirtioBlk::new()
+}

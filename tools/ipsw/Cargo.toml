@@ -1,7 +1,11 @@
 [package]
-name = "ipsw-downloader"
+name = "ipsw-cli"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "ipsw"
+path = "main.rs"
 
 [dependencies]
 reqwest = { workspace = true }
@@ -9,5 +13,9 @@ plist = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+vfdecrypt = { path = "../../libs/vfdecrypt" }
+ipsw-downloader = { path = "../../libs/ipsw-downloader" }
+indicatif = "0.18.3"
+clap = { workspace = true }
 
 [dev-dependencies]

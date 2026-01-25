@@ -27,9 +27,6 @@ global_asm!(include_str!("boot.s"));
 global_asm!(include_str!("vectors.s"));
 global_asm!(include_str!("switch.s"));
 
-// static USER_PROGRAM: &[u8] =
-// include_bytes!("../../target/aarch64-unknown-none-softfloat/release/user");
-
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() {
     kprintln!("Hello from GravityOS. Spawning iOS 5 ARMv7 processes...");
@@ -43,29 +40,29 @@ pub extern "C" fn kmain() {
     kprintln!("Vectors initialized");
 
     // Initialize virtio block device and load shared cache
-    let mut shared_cache_data: &[u8] = &[];
+    // let mut shared_cache_data: &[u8] = &[];
 
-    if let Some(mut blk) = virtio::init() {
+    if let Some(blk) = virtio::init() {
         kprintln!("VirtIO disk found, loading shared cache...");
 
         // Shared cache is at sector 0, ~200MB
-        const SHARED_CACHE_SIZE: usize = 200 * 1024 * 1024;
-        const SHARED_CACHE_PHYS: u64 = 0x5000_0000;
+        // const SHARED_CACHE_SIZE: usize = 200 * 1024 * 1024;
+        // const SHARED_CACHE_PHYS: u64 = 0x5000_0000;
 
-        let cache_buf = unsafe {
-            core::slice::from_raw_parts_mut(SHARED_CACHE_PHYS as *mut u8, SHARED_CACHE_SIZE)
-        };
+        // let cache_buf = unsafe {
+        //     core::slice::from_raw_parts_mut(SHARED_CACHE_PHYS as *mut u8, SHARED_CACHE_SIZE)
+        // };
 
-        if blk.read_sectors(0, cache_buf) {
-            kprintln!(
-                "Shared cache loaded ({} bytes at phys {:x})",
-                SHARED_CACHE_SIZE,
-                SHARED_CACHE_PHYS
-            );
-            shared_cache_data = cache_buf;
-        } else {
-            kprintln!("Failed to read shared cache from disk");
-        }
+        // if blk.read_sectors(0, cache_buf) {
+        //     kprintln!(
+        //         "Shared cache loaded ({} bytes at phys {:x})",
+        //         SHARED_CACHE_SIZE,
+        //         SHARED_CACHE_PHYS
+        //     );
+        //     shared_cache_data = cache_buf;
+        // } else {
+        //     kprintln!("Failed to read shared cache from disk");
+        // }
 
         // Initialize VFS from disk (at 400MB offset)
         kprintln!("Initializing VFS from disk...");
@@ -77,13 +74,25 @@ pub extern "C" fn kmain() {
         kprintln!("No virtio disk found");
     }
 
-    // iOS 5 ARMv7 Darwin executables
-    static MAIN_BIN: &[u8] = include_bytes!("test_bin.bin");
-    static DYLD_BIN: &[u8] = include_bytes!("dyld.bin");
-
-    if !shared_cache_data.is_empty() {
-        macho::MachOLoader::map_shared_cache(shared_cache_data);
-    }
+    // if !shared_cache_data.is_empty() {
+    //     if macho::MachOLoader::map_shared_cache(shared_cache_data).is_none() {
+    //         kprintln!("Shared cache mapping failed/invalid. Mapping dummy range at 0x30000000");
+    //         crate::mmu::map_range(
+    //             0x3000_0000,
+    //             0x5000_0000,
+    //             0x200000, // 2MB
+    //             crate::mmu::MapPermission::UserRO,
+    //         );
+    //     }
+    // } else {
+    //     kprintln!("Shared cache empty. Mapping dummy range at 0x30000000");
+    //     crate::mmu::map_range(
+    //         0x3000_0000,
+    //         0x5000_0000,
+    //         0x200000, // 2MB
+    //         crate::mmu::MapPermission::UserRO,
+    //     );
+    // }
 
     // Note: 0x40000000 seems to be used by dyld for CommPage or similar absolute reference.
     // We move the app to 0x4000_0000.
@@ -100,17 +109,15 @@ pub extern "C" fn kmain() {
         crate::mmu::COMMPAGE_STORAGE[3] = b'm';
 
         // Set version at 0x1E (u16)
-        unsafe {
-            let version_ptr = &mut crate::mmu::COMMPAGE_STORAGE[0x1E] as *mut u8 as *mut u16;
-            *version_ptr = 13;
-            
-            // Set ncpus at 0x22 (u8)
-            crate::mmu::COMMPAGE_STORAGE[0x22] = 1;
-            
-            // Set pagesize at 0x24 (u32)
-            let pgsize_ptr = &mut crate::mmu::COMMPAGE_STORAGE[0x24] as *mut u8 as *mut u32;
-            *pgsize_ptr = 4096;
-        }
+        let version_ptr = &mut crate::mmu::COMMPAGE_STORAGE[0x1E] as *mut u8 as *mut u16;
+        *version_ptr = 13;
+
+        // Set ncpus at 0x22 (u8)
+        crate::mmu::COMMPAGE_STORAGE[0x22] = 1;
+
+        // Set pagesize at 0x24 (u32)
+        let pgsize_ptr = &mut crate::mmu::COMMPAGE_STORAGE[0x24] as *mut u8 as *mut u32;
+        *pgsize_ptr = 4096;
 
         let sc_addr = 0x3000_0000u32;
         // Try both 0x28 and 0x38 for shared cache base in CommPage
@@ -125,12 +132,20 @@ pub extern "C" fn kmain() {
         );
     }
 
-    let main_loader = macho::MachOLoader::load(MAIN_BIN, load_offset);
+    let main_bin = {
+        let mut file = vfs::open("/sbin/launchd").expect("Failed to open launchd");
+        file.read_to_end()
+    };
+    let dyld_bin = {
+        let mut file = vfs::open("/usr/lib/dyld").expect("Failed to open dyld");
+        file.read_to_end()
+    };
+    let main_loader = macho::MachOLoader::load(&main_bin, load_offset);
     if let Some(loader) = main_loader {
         let (entry, path) = if let Some(dyld_path) = loader.dylinker {
             kprintln!("Binary requests dylinker: {}", dyld_path);
             let dyld_loader =
-                macho::MachOLoader::load(DYLD_BIN, load_offset).expect("Failed to load dyld");
+                macho::MachOLoader::load(&dyld_bin, load_offset).expect("Failed to load dyld");
             (dyld_loader.entry, dyld_path)
         } else {
             (loader.entry + load_offset, String::from("/bin/initial"))
@@ -183,7 +198,9 @@ pub extern "C" fn kmain() {
             use alloc::alloc::{Layout, alloc_zeroed};
             let layout = Layout::from_size_align(size, 4096).unwrap();
             let ptr = unsafe { alloc_zeroed(layout) };
-            if ptr.is_null() { panic!("Failed to allocate TLS"); }
+            if ptr.is_null() {
+                panic!("Failed to allocate TLS");
+            }
             (ptr as u64, size)
         };
         crate::mmu::map_range(

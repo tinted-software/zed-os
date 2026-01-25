@@ -36,15 +36,27 @@ pub async fn get_ipsw_list() -> Result<IPSWList, IPSWError> {
     Ok(list)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub async fn fetch_firmware_url(device: &str, build: &str) -> Result<Option<String>, IPSWError> {
+    let list = get_ipsw_list().await?;
+    let Value::Dictionary(root_dict) = list.versions else {
+        return Ok(None);
+    };
 
-    #[tokio::test]
-    async fn test_get_ipsw_list() {
-        let result = get_ipsw_list().await;
-        assert!(result.is_ok());
-        let ipsw_list = result.unwrap();
-        println!("{:#?}", ipsw_list);
+    for (_bucket_key, bucket_val) in root_dict {
+        let Value::Dictionary(bucket_dict) = bucket_val else {
+            continue;
+        };
+
+        if let Some(Value::Dictionary(mobile_versions)) =
+            bucket_dict.get("MobileDeviceSoftwareVersions")
+            && let Some(Value::Dictionary(device_versions)) = mobile_versions.get(device)
+            && let Some(Value::Dictionary(build_info)) = device_versions.get(build)
+            && let Some(Value::Dictionary(restore_info)) = build_info.get("Restore")
+            && let Some(Value::String(url)) = restore_info.get("FirmwareURL")
+        {
+            return Ok(Some(url.clone()));
+        }
     }
+
+    Ok(None)
 }

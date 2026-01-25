@@ -1,7 +1,6 @@
 use crate::kprintln;
 use alloc::string::String;
 use alloc::vec;
-use alloc::vec::Vec;
 use goblin::mach::{Mach, MachO};
 
 pub struct MachOLoader {
@@ -24,7 +23,7 @@ pub fn setup_stack(sp: u64, exec_path: &str, mh_addr: u64) -> u64 {
     let mut current_sp = sp;
 
     // Copy strings to stack
-    let mut strings = vec![
+    let strings = vec![
         exec_path,
         "dyld_shared_cache_base_address=0x30000000",
         "executable_path=/bin/initial",
@@ -177,10 +176,10 @@ impl MachOLoader {
                 goblin::mach::load_command::CommandVariant::LoadDylinker(d) => {
                     let name_offset = d.name as usize;
                     let name_ptr = &data[cmd.offset + name_offset..];
-                    if let Some(name_bytes) = name_ptr.split(|&b| b == 0).next() {
-                        if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            dylinker = Some(String::from(name));
-                        }
+                    if let Some(name_bytes) = name_ptr.split(|&b| b == 0).next()
+                        && let Ok(name) = core::str::from_utf8(name_bytes)
+                    {
+                        dylinker = Some(String::from(name));
                     }
                 }
                 goblin::mach::load_command::CommandVariant::Unixthread(t)
@@ -290,7 +289,7 @@ impl MachOLoader {
         }
 
         Some(Self {
-            entry: (macho.entry as u64) + load_offset,
+            entry: macho.entry + load_offset,
             header_addr,
             dylinker,
         })

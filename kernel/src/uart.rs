@@ -15,20 +15,16 @@ impl Write for Uart {
     }
 }
 
-pub fn print_str(s: &str) {
-    let _ = Uart.write_str(s);
-}
-
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        let _ = crate::uart::Uart.write_fmt(format_args!($($arg)*));
+        let _ = $crate::uart::Uart.write_fmt(format_args!($($arg)*));
     });
 }
 
 #[macro_export]
 macro_rules! kprintln {
-    () => (crate::kprint!("\n"));
-    ($($arg:tt)*) => (crate::kprint!("{}\n", format_args!($($arg)*)));
+    () => ($crate::kprint!("\n"));
+    ($($arg:tt)*) => ($crate::kprint!("{}\n", format_args!($($arg)*)));
 }

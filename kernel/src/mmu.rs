@@ -104,15 +104,13 @@ pub fn init() {
     }
 
     // Map CommPage at 0xFFFF0000
-    unsafe {
-        // CommPage needs to be UserRO
-        map_range(
-            0xFFFF0000,
-            core::ptr::addr_of!(COMMPAGE_STORAGE) as u64,
-            4096,
-            MapPermission::UserRO,
-        );
-    }
+    // CommPage needs to be UserRO
+    map_range(
+        0xFFFF0000,
+        core::ptr::addr_of!(COMMPAGE_STORAGE) as u64,
+        4096,
+        MapPermission::UserRO,
+    );
 }
 
 pub static mut COMMPAGE_STORAGE: [u8; 4096] = [0; 4096];
@@ -193,29 +191,36 @@ pub fn map_range(vaddr: u64, paddr: u64, size: u64, perm: MapPermission) {
 
                 // Populate the new L3 table with 512 pages from the block
                 for p in 0..512 {
-                    L3_POOL[l3_idx_to_use].0[p] = (block_paddr + (p as u64 * 0x1000))
-                        | DESC_VALID
-                        | DESC_PAGE
-                        | (block_flags & !DESC_TABLE);
+                    core::ptr::write_volatile(
+                        &mut L3_POOL[l3_idx_to_use].0[p],
+                        (block_paddr + (p as u64 * 0x1000))
+                            | DESC_VALID
+                            | DESC_PAGE
+                            | (block_flags & !DESC_TABLE),
+                    );
                 }
 
-                L2_TABLES[l1_idx].0[l2_idx] =
-                    (&L3_POOL[l3_idx_to_use] as *const _ as u64) | DESC_VALID | DESC_TABLE;
+                core::ptr::write_volatile(
+                    &mut L2_TABLES[l1_idx].0[l2_idx],
+                    (&L3_POOL[l3_idx_to_use] as *const _ as u64) | DESC_VALID | DESC_TABLE,
+                );
             }
 
             let l3_ptr = (L2_TABLES[l1_idx].0[l2_idx] & TABLE_ADDR_MASK) as *mut PageTable;
             let ap = get_ap_bits(perm);
             let xn = get_xn_bits(perm);
 
-            (*l3_ptr).0[l3_idx] =
-                curr_p | DESC_VALID | DESC_PAGE | MAIR_MEM | AF | SH_INNER | ap | xn;
+            core::ptr::write_volatile(
+                &mut (*l3_ptr).0[l3_idx],
+                curr_p | DESC_VALID | DESC_PAGE | MAIR_MEM | AF | SH_INNER | ap | xn,
+            );
 
             // Debug: verify first mapping
             if curr_v == start_v {
                 kprintln!(
                     "map_range: L3[{}] = {:016x} (phys=curr_p={:x})",
                     l3_idx,
-                    (*l3_ptr).0[l3_idx],
+                    core::ptr::read_volatile(&(*l3_ptr).0[l3_idx]),
                     curr_p
                 );
             }
@@ -225,6 +230,6 @@ pub fn map_range(vaddr: u64, paddr: u64, size: u64, perm: MapPermission) {
     }
 
     unsafe {
-        asm!("tlbi vmalle1is", "dsb sy", "isb");
+        asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb");
     }
 }

@@ -2,7 +2,6 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::kprintln;
 
 pub type MachPort = u32;
 
@@ -84,16 +83,15 @@ pub fn mach_msg(
     _notify: u32,
     space: &mut IpcSpace,
 ) -> u32 {
-    
     // Validate pointer
     if msg.is_null() {
         return 0x10000000; // KERN_INVALID_ADDRESS
     }
 
     // Read header
-    let mut header = unsafe { core::ptr::read_volatile(msg) };
-    
-    // kprintln!("ipc: mach_msg id={} bits={:x} local={:x} remote={:x} opt={:x}", 
+    let header = unsafe { core::ptr::read_volatile(msg) };
+
+    // kprintln!("ipc: mach_msg id={} bits={:x} local={:x} remote={:x} opt={:x}",
     //     header.msgh_id, header.msgh_bits, header.msgh_local_port, header.msgh_remote_port, option);
 
     if (option & MACH_SEND_MSG) != 0 {
@@ -120,9 +118,9 @@ pub fn mach_msg(
         // rcv_name is where we listen.
         // But mach_msg usually receives on msgh_local_port?
         // No, the syscall arg `rcv_name` specifies the receive right.
-        
+
         // kprintln!("ipc: receiving on port {:x}", rcv_name);
-        
+
         if let Some(port) = space.get_port(rcv_name) {
             let mut p = port.lock();
             if let Some(data) = p.messages.pop() {

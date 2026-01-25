@@ -16,24 +16,15 @@ Zed OS is an operating system built with the Zed Editor. It is a Rust-based kern
 
 ### Building the Kernel
 
-```bash
-cargo kbuild
 ```
-
-This runs:
-```
-cargo build --package zedos-kernel --target aarch64-unknown-none-softfloat -Zbuild-std=core,alloc
+cargo build --package zedos-kernel --target aarch64-unknown-none-softfloat
 ```
 
 ### Running in QEMU
 
-```bash
-cargo krun
-```
-
 This runs:
 ```
-cargo run --package zedos-kernel --target aarch64-unknown-none-softfloat -Zbuild-std=core,alloc
+cargo run --package zedos-kernel --target aarch64-unknown-none-softfloat
 ```
 
 QEMU is configured with:
@@ -51,10 +42,14 @@ QEMU is configured with:
 ./make_disk.sh
 
 # Build the kernel
-cargo kbuild
+cargo build --package zedos-kernel --target aarch64-unknown-none-softfloat
 
 # Run in QEMU
-cargo krun
+cargo run --package zedos-kernel --target aarch64-unknown-none-softfloat
+
+# Run linter
+cargo clippy --package zedos-kernel --target aarch64-unknown-none-softfloat
+cargo fmt --check
 ```
 
 ## Workspace Structure

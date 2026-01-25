@@ -1,8 +1,9 @@
 //! Simple Virtual Filesystem abstraction
 
 use crate::tarfs::TarFs;
-use alloc::sync::Arc;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 static VFS: Mutex<Option<Vfs>> = Mutex::new(None);
@@ -12,6 +13,21 @@ pub trait File: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize;
     fn seek(&mut self, pos: u64);
     fn size(&self) -> u64;
+
+    fn read_to_end(&mut self) -> Vec<u8> {
+        let mut chunk = [0u8; 4096];
+        let mut buf = Vec::new();
+
+        loop {
+            let read = self.read(&mut chunk);
+            if read == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..read]);
+        }
+
+        buf
+    }
 }
 
 pub struct Vfs {
@@ -39,7 +55,9 @@ pub fn init(tarfs: TarFs) {
 /// Open a file by path
 pub fn open(path: &str) -> Option<FileHandle> {
     if path == "/dev/random" || path == "/dev/urandom" {
-        return Some(FileHandle { file: Box::new(RandomFile { pos: 0 }) });
+        return Some(FileHandle {
+            file: Box::new(RandomFile { pos: 0 }),
+        });
     }
 
     let vfs = VFS.lock();
@@ -85,15 +103,6 @@ impl File for RandomFile {
     }
 }
 
-/// Stat a file (returns size)
-pub fn stat_size(path: &str) -> Option<usize> {
-    let vfs = VFS.lock();
-    let vfs = vfs.as_ref()?;
-
-    let file = vfs.tarfs.find(path)?;
-    Some(file.size)
-}
-
 impl FileHandle {
     /// Read bytes from file
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
@@ -105,13 +114,13 @@ impl FileHandle {
         self.file.read_at(offset, buf)
     }
 
-    /// Seek to position
-    pub fn seek(&mut self, pos: u64) {
-        self.file.seek(pos);
-    }
-
     /// Get file size
     pub fn size(&self) -> u64 {
         self.file.size()
+    }
+
+    /// Read bytes from file to end
+    pub fn read_to_end(&mut self) -> Vec<u8> {
+        self.file.read_to_end()
     }
 }

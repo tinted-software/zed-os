@@ -1,11 +1,11 @@
+use crate::ipc::IpcSpace;
 use crate::kprintln;
 use crate::process::CpuContext;
-use crate::ipc::IpcSpace;
 use crate::vfs::FileHandle;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -31,8 +31,7 @@ pub struct Process {
 impl Process {
     pub fn new(entry_point: u64, user_sp: u64, args: &[u64], tls_base: u64) -> Self {
         let stack_size = 64 * 1024;
-        let mut stack = Vec::with_capacity(stack_size);
-        unsafe { stack.set_len(stack_size) };
+        let stack = vec![0u8; stack_size];
         let sp = stack.as_ptr() as u64 + stack.len() as u64;
 
         kprintln!(
@@ -61,9 +60,7 @@ impl Process {
         );
 
         // Pass up to 6 args in x21..x26
-        for i in 0..args.len().min(6) {
-            context.regs[2 + i] = args[i];
-        }
+        context.regs[2..(args.len().min(6) + 2)].copy_from_slice(&args[..args.len().min(6)]);
 
         // Detect if entry point is Thumb (bit 0 set)
         let is_thumb = (entry_point & 1) != 0;
@@ -87,10 +84,6 @@ impl Process {
             ipc_space: IpcSpace::new(),
             files: (0..32).map(|_| None).collect(),
         }
-    }
-
-    pub fn set_user_sp(&mut self, sp: u64) {
-        self.context.regs[1] = sp; // x20
     }
 }
 
@@ -136,10 +129,10 @@ impl Scheduler {
                 .back_mut()
                 .map(|p| &mut p.context as *mut CpuContext);
 
-            return Some((prev_ctx_ptr, next_ctx_ptr));
+            Some((prev_ctx_ptr, next_ctx_ptr))
         } else {
             // No ready process. Keep running current.
-            return None;
+            None
         }
     }
 }

@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs";
   };
 
   outputs =
@@ -25,18 +25,16 @@
               rec {
                 nativeBuildInputs = [
                   pyrefly
-                  (rustup.overrideAttrs (old: {
-                    doCheck = false;
-                  }))
+                  rustup
                   pkg-config
-                  nixfmt-rfc-style
+                  nixfmt
                   nil
                   python3
                   wild
                 ];
 
                 buildInputs = [
-                  wayland
+                  libX11
                   alsa-lib
                   libxkbcommon
                   vulkan-loader

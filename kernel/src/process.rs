@@ -105,7 +105,7 @@ fn dump_mem(addr: u64, len: u64) {
     for i in (0..len).step_by(16) {
         let curr = addr + i;
         // Basic safety check for known mapped user/kernel regions
-        if (curr >= 0x30000000 && curr < 0x80000000) || (curr >= 0x10000000 && curr < 0x20000000) {
+        if (0x30000000..0x80000000).contains(&curr) || (0x10000000..0x20000000).contains(&curr) {
             // OK
         } else {
             // kprintln!("{:08x}: <unmapped>", curr);
@@ -198,7 +198,7 @@ fn handle_mach_trap(frame: &mut TrapFrame, trap_num: i32) {
 
     match trap_num {
         3 => {
-            // mach_port_allocate or task_self? 
+            // mach_port_allocate or task_self?
             if frame.x[2] > 0x1000 {
                 let name_ptr = frame.x[2];
                 let mut scheduler = SCHEDULER.lock();
@@ -216,24 +216,32 @@ fn handle_mach_trap(frame: &mut TrapFrame, trap_num: i32) {
                 frame.x[0] = 1; // Return port 1 (task self)
             }
         }
-        10 | 11 | 12 | 13 => {
+        10..=13 => {
             // VM traps (allocate, deallocate, map, copy)
             let addr_ptr = frame.x[1];
             let size = frame.x[2];
             let anywhere = frame.x[3] != 0;
-            static NEXT_VM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x7000_0000);
-            
+            static NEXT_VM: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0x7000_0000);
+
             unsafe {
-                let mut addr = if anywhere || addr_ptr < 0x1000 { 0 } else { core::ptr::read_unaligned(addr_ptr as *const u32) as u64 };
-                if addr == 0 || addr < 0x1000 { 
-                    addr = NEXT_VM.fetch_add((size + 0xFFF) & !0xFFF, core::sync::atomic::Ordering::Relaxed); 
+                let mut addr = if anywhere || addr_ptr < 0x1000 {
+                    0
+                } else {
+                    core::ptr::read_unaligned(addr_ptr as *const u32) as u64
+                };
+                if addr == 0 || addr < 0x1000 {
+                    addr = NEXT_VM.fetch_add(
+                        (size + 0xFFF) & !0xFFF,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 crate::mmu::map_range(addr, addr, size, crate::mmu::MapPermission::UserRW);
                 if addr_ptr > 0x1000 {
                     core::ptr::write_volatile(addr_ptr as *mut u32, addr as u32);
                     core::arch::asm!("dsb sy", "isb");
                 }
-                
+
                 frame.x[0] = 0; // KERN_SUCCESS
             }
         }
@@ -267,9 +275,11 @@ fn handle_mach_trap(frame: &mut TrapFrame, trap_num: i32) {
                     rcv_name,
                     timeout,
                     0,
-                    &mut proc.ipc_space
+                    &mut proc.ipc_space,
                 );
-                unsafe { core::arch::asm!("dsb sy", "isb"); }
+                unsafe {
+                    core::arch::asm!("dsb sy", "isb");
+                }
                 frame.x[0] = ret as u64;
             } else {
                 frame.x[0] = 0x10000003;
@@ -310,16 +320,12 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             // indir syscall
             let real_syscall = frame.x[0];
             let mut saved = [0u64; 6];
-            for i in 0..6 {
-                saved[i] = frame.x[i];
-            }
+            saved[1..6].copy_from_slice(&frame.x[1..6]);
             for i in 0..6 {
                 frame.x[i] = frame.x[i + 1];
             }
             handle_bsd_syscall(frame, real_syscall as i32);
-            for i in 1..6 {
-                frame.x[i] = saved[i];
-            }
+            frame.x[1..6].copy_from_slice(&saved[1..6]);
         }
         1 => sys_exit(),
         3 => {
@@ -327,25 +333,29 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             let fd = frame.x[0];
             let buf = frame.x[1];
             let nbyte = frame.x[2];
-            
+
             if fd == 100 {
                 let cache_base = 0x30000000 as *const u8;
-                unsafe { core::ptr::copy_nonoverlapping(cache_base, buf as *mut u8, nbyte as usize); }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(cache_base, buf as *mut u8, nbyte as usize);
+                }
                 frame.x[0] = nbyte;
             } else if fd < 32 {
                 let mut bytes_read = 0;
                 let mut success = false;
                 {
                     let mut scheduler = SCHEDULER.lock();
-                    if let Some(proc) = &mut scheduler.current_process {
-                        if let Some(Some(file)) = proc.files.get_mut(fd as usize) {
-                            let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, nbyte as usize) };
-                            bytes_read = file.read(slice);
-                            success = true;
-                        }
+                    if let Some(proc) = &mut scheduler.current_process
+                        && let Some(Some(file)) = proc.files.get_mut(fd as usize)
+                    {
+                        let slice = unsafe {
+                            core::slice::from_raw_parts_mut(buf as *mut u8, nbyte as usize)
+                        };
+                        bytes_read = file.read(slice);
+                        success = true;
                     }
                 }
-                
+
                 if success {
                     kprintln!("sys_read: Read {} bytes from fd {}", bytes_read, fd);
                     frame.x[0] = bytes_read as u64;
@@ -367,17 +377,17 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             let len = slice.iter().position(|&c| c == 0).unwrap_or(256);
             if let Ok(path) = core::str::from_utf8(&slice[..len]) {
                 kprintln!("sys_open: {}", path);
-                
+
                 // Try VFS
                 if let Some(handle) = crate::vfs::open(path) {
                     let mut scheduler = SCHEDULER.lock();
-                    if let Some(proc) = &mut scheduler.current_process {
-                        if let Some(fd) = proc.files.iter().position(|f| f.is_none()) {
-                            proc.files[fd] = Some(handle);
-                            kprintln!("sys_open: Opened {} as fd {}", path, fd);
-                            frame.x[0] = fd as u64;
-                            return;
-                        }
+                    if let Some(proc) = &mut scheduler.current_process
+                        && let Some(fd) = proc.files.iter().position(|f| f.is_none())
+                    {
+                        proc.files[fd] = Some(handle);
+                        kprintln!("sys_open: Opened {} as fd {}", path, fd);
+                        frame.x[0] = fd as u64;
+                        return;
                     }
                     frame.x[0] = 24; // EMFILE
                     frame.spsr |= 1 << 29; // Set Carry
@@ -388,7 +398,7 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
                     frame.x[0] = 100;
                     return;
                 }
-                
+
                 kprintln!("sys_open: Failed to open '{}' in VFS", path);
             }
             frame.x[0] = 2; // ENOENT
@@ -399,19 +409,19 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             let fd = frame.x[0];
             if fd < 32 {
                 let mut scheduler = SCHEDULER.lock();
-                if let Some(proc) = &mut scheduler.current_process {
-                    if (fd as usize) < proc.files.len() {
-                        proc.files[fd as usize] = None;
-                    }
+                if let Some(proc) = &mut scheduler.current_process
+                    && (fd as usize) < proc.files.len()
+                {
+                    proc.files[fd as usize] = None;
                 }
             }
             frame.x[0] = 0;
         }
         20 => frame.x[0] = sys_getpid(),
-        24 | 25 => frame.x[0] = 0, // getuid, geteuid
+        24 | 25 => frame.x[0] = 0,       // getuid, geteuid
         43 | 47 | 126 => frame.x[0] = 0, // getgid, getegid
-        74 => frame.x[0] = 0, // mprotect
-        116 => frame.x[0] = 0, // gettimeofday
+        74 => frame.x[0] = 0,            // mprotect
+        116 => frame.x[0] = 0,           // gettimeofday
         153 => {
             // pread
             let fd = frame.x[0];
@@ -419,32 +429,41 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             let nbyte = frame.x[2];
             // off_t is 64-bit, usually at r4/r5 with padding in r3 for ARMv7.
             let mut offset = frame.x[4] | (frame.x[5] << 32);
-            
+
             // Heuristic: if offset is crazy high, try r3/r4
             if offset > 0x0000_1000_0000_0000 {
-                 offset = frame.x[3] | (frame.x[4] << 32);
+                offset = frame.x[3] | (frame.x[4] << 32);
             }
-            
+
             if fd == 100 {
                 let cache_base = (0x30000000 + offset) as *const u8;
-                unsafe { core::ptr::copy_nonoverlapping(cache_base, buf as *mut u8, nbyte as usize); }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(cache_base, buf as *mut u8, nbyte as usize);
+                }
                 frame.x[0] = nbyte;
             } else if fd < 32 {
                 let mut bytes_read = 0;
                 let mut success = false;
                 {
                     let mut scheduler = SCHEDULER.lock();
-                    if let Some(proc) = &mut scheduler.current_process {
-                        if let Some(Some(file)) = proc.files.get(fd as usize) {
-                            let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, nbyte as usize) };
-                            bytes_read = file.read_at(offset, slice);
-                            success = true;
-                        }
+                    if let Some(proc) = &mut scheduler.current_process
+                        && let Some(Some(file)) = proc.files.get(fd as usize)
+                    {
+                        let slice = unsafe {
+                            core::slice::from_raw_parts_mut(buf as *mut u8, nbyte as usize)
+                        };
+                        bytes_read = file.read_at(offset, slice);
+                        success = true;
                     }
                 }
-                
+
                 if success {
-                    kprintln!("sys_pread: Read {} bytes from fd {} at offset {}", bytes_read, fd, offset);
+                    kprintln!(
+                        "sys_pread: Read {} bytes from fd {} at offset {}",
+                        bytes_read,
+                        fd,
+                        offset
+                    );
                     frame.x[0] = bytes_read as u64;
                 } else {
                     kprintln!("sys_pread: Bad fd {} (not open)", fd);
@@ -465,10 +484,10 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
                 size = 200 * 1024 * 1024;
             } else if fd < 32 {
                 let mut scheduler = SCHEDULER.lock();
-                if let Some(proc) = &mut scheduler.current_process {
-                    if let Some(Some(file)) = proc.files.get(fd as usize) {
-                        size = file.size() as i64;
-                    }
+                if let Some(proc) = &mut scheduler.current_process
+                    && let Some(Some(file)) = proc.files.get(fd as usize)
+                {
+                    size = file.size() as i64;
                 }
             }
             populate_stat64(frame.x[1], size);
@@ -497,14 +516,26 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
             if offset > 0x0000_1000_0000_0000 {
                 offset = frame.x[5] | (frame.x[6] << 32);
             }
-            
-            kprintln!("sys_mmap: addr={:x} len={:x} prot={:x} flags={:x} fd={} offset={:x}", addr, len, prot, flags, fd, offset);
-            
+
+            kprintln!(
+                "sys_mmap: addr={:x} len={:x} prot={:x} flags={:x} fd={} offset={:x}",
+                addr,
+                len,
+                prot,
+                flags,
+                fd,
+                offset
+            );
+
             let mut final_addr = addr;
-            static NEXT_MMAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x8000_0000);
-            
+            static NEXT_MMAP: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0x8000_0000);
+
             if final_addr == 0 {
-                final_addr = NEXT_MMAP.fetch_add((len + 0xFFF) & !0xFFF, core::sync::atomic::Ordering::Relaxed);
+                final_addr = NEXT_MMAP.fetch_add(
+                    (len + 0xFFF) & !0xFFF,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
             }
 
             let perm = if (prot & 2) != 0 {
@@ -523,16 +554,16 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
 
             // Allocate and map
             let mut data = alloc::vec![0u8; len as usize];
-            
+
             if fd < 32 {
                 let mut success = false;
                 {
                     let mut scheduler = SCHEDULER.lock();
-                    if let Some(proc) = &mut scheduler.current_process {
-                        if let Some(Some(file)) = proc.files.get(fd as usize) {
-                            file.read_at(offset, &mut data);
-                            success = true;
-                        }
+                    if let Some(proc) = &mut scheduler.current_process
+                        && let Some(Some(file)) = proc.files.get(fd as usize)
+                    {
+                        file.read_at(offset, &mut data);
+                        success = true;
                     }
                 }
                 if !success && fd != 0xFFFFFFFF && (fd as i32) != -1 {
@@ -563,32 +594,46 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
                     let mib = core::slice::from_raw_parts(name_ptr as *const i32, namelen as usize);
                     // kprintln!("sysctl mib: {:?}", mib);
 
-                    if mib[0] == 6 { // CTL_HW
+                    if mib[0] == 6 {
+                        // CTL_HW
                         match mib[1] {
-                            7 => { // HW_PAGESIZE
-                                if oldp != 0 { *(oldp as *mut u32) = 4096; }
-                                if oldlenp != 0 { *(oldlenp as *mut u32) = 4; }
+                            7 => {
+                                // HW_PAGESIZE
+                                if oldp != 0 {
+                                    *(oldp as *mut u32) = 4096;
+                                }
+                                if oldlenp != 0 {
+                                    *(oldlenp as *mut u32) = 4;
+                                }
                                 frame.x[0] = 0;
                                 return;
                             }
-                            3 => { // HW_NCPU
-                                if oldp != 0 { *(oldp as *mut u32) = 1; }
-                                if oldlenp != 0 { *(oldlenp as *mut u32) = 4; }
+                            3 => {
+                                // HW_NCPU
+                                if oldp != 0 {
+                                    *(oldp as *mut u32) = 1;
+                                }
+                                if oldlenp != 0 {
+                                    *(oldlenp as *mut u32) = 4;
+                                }
                                 frame.x[0] = 0;
                                 return;
                             }
                             _ => {}
                         }
                     }
-                    if mib[0] == 1 { // CTL_KERN
-                        match mib[1] {
-                            24 => { // KERN_ARGMAX
-                                if oldp != 0 { *(oldp as *mut u32) = 65536; }
-                                if oldlenp != 0 { *(oldlenp as *mut u32) = 4; }
-                                frame.x[0] = 0;
-                                return;
+                    if mib[0] == 1 {
+                        // CTL_KERN
+                        if mib[1] == 24 {
+                            // KERN_ARGMAX
+                            if oldp != 0 {
+                                *(oldp as *mut u32) = 65536;
                             }
-                            _ => {}
+                            if oldlenp != 0 {
+                                *(oldlenp as *mut u32) = 4;
+                            }
+                            frame.x[0] = 0;
+                            return;
                         }
                     }
                 }
@@ -598,7 +643,7 @@ fn handle_bsd_syscall(frame: &mut TrapFrame, syscall_num: i32) {
         33 => frame.x[0] = 0, // access
         190 | 338 => {
             // lstat, stat64
-            populate_stat64(frame.x[1], 200*1024*1024);
+            populate_stat64(frame.x[1], 200 * 1024 * 1024);
             frame.x[0] = 0;
         }
         327 => frame.x[0] = 0, // issetugid
