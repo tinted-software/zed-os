@@ -15,9 +15,5 @@ rustflags = [
     "-C", "sanitizer=kcfi",
 ]
 
-[unstable]
-build-std = ["core", "compiler_builtins", "alloc"]
-build-std-features = ["compiler-builtins-mem"]
-
 [target.aarch64-unknown-none-softfloat]
 runner = "qemu-system-aarch64 -accel tcg,thread=multi -M virt,highmem=off -cpu cortex-a57 -smp 4 -m 2G -nographic -drive file=disk.img,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -kernel"

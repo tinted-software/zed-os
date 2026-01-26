@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "libs/*",
     "tools/ipsw",
+    "tools/make-disk",
     "kernel",
 ]
 
@@ -36,3 +37,6 @@ pbkdf2 = "0.12.2"
 des = "0.8.1"
 cbc = { version = "0.1.2", features = ["alloc"] }
 cipher = { version = "0.4.4", features = ["block-padding"] }
+indicatif = "0.18.3"
+tar = "0.4.43"
+

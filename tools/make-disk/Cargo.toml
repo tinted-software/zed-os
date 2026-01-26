@@ -1,0 +1,9 @@
+[package]
+name = "make-disk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
