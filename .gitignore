@@ -4,5 +4,6 @@ target/
 rust-project.json
 compile_commands.json
 *.ipsw
-Telluride9A405.K48OS
+*.dmg
 /buck-out
+/third-party/.cargo
