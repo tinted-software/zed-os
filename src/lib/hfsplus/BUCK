@@ -9,6 +9,7 @@ rust_library(
         "third-party//:hashbrown",
         "third-party//:binrw",
         "third-party//:spin",
+        "third-party//:zlib-rs",
     ],
     visibility = ["PUBLIC"],
 )

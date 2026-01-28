@@ -23,7 +23,13 @@ buck2 build //src/kernel:kernel --target-platforms //platforms:kernel-arm64
 
 ### Running the Kernel
 
-TODO.
+```bash
+# Build the disk image
+# buck2 run //src/setup:setup
+
+# Run the kernel in QEMU
+buck2 run //src/setup:run_qemu --target-platforms //platforms:kernel-arm64
+```
 
 ## Workspace Structure
 

@@ -62,3 +62,4 @@ crc32fast = "1.5"
 hashbrown = "0.15"
 memmap2 = "0.9"
 binrw = { version = "0.14.1", default-features = false }
+zlib-rs = { version = "0.6.0", default-features = false, features = ["__internal-api"] }

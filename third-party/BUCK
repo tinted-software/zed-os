@@ -5623,6 +5623,30 @@ cargo.rust_library(
     visibility = [],
 )
 
+alias(
+    name = "zlib-rs",
+    actual = ":zlib-rs-0.6.0",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "zlib-rs-0.6.0.crate",
+    sha256 = "a7948af682ccbc3342b6e9420e8c51c1fe5d7bf7756002b4a3c6cabfe96a7e3c",
+    strip_prefix = "zlib-rs-0.6.0",
+    urls = ["https://static.crates.io/crates/zlib-rs/0.6.0/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "zlib-rs-0.6.0",
+    srcs = [":zlib-rs-0.6.0.crate"],
+    crate = "zlib_rs",
+    crate_root = "zlib-rs-0.6.0.crate/src/lib.rs",
+    edition = "2021",
+    features = ["__internal-api"],
+    visibility = [],
+)
+
 http_archive(
     name = "zopfli-0.8.3.crate",
     sha256 = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249",

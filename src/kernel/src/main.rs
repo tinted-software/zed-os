@@ -46,28 +46,6 @@ pub extern "C" fn kmain() {
     // let mut shared_cache_data: &[u8] = &[];
 
     if let Some(blk) = virtio::init() {
-        kprintln!("VirtIO disk found, loading shared cache...");
-
-        // Shared cache is at sector 0, ~200MB
-        // const SHARED_CACHE_SIZE: usize = 200 * 1024 * 1024;
-        // const SHARED_CACHE_PHYS: u64 = 0x5000_0000;
-
-        // let cache_buf = unsafe {
-        //     core::slice::from_raw_parts_mut(SHARED_CACHE_PHYS as *mut u8, SHARED_CACHE_SIZE)
-        // };
-
-        // if blk.read_sectors(0, cache_buf) {
-        //     kprintln!(
-        //         "Shared cache loaded ({} bytes at phys {:x})",
-        //         SHARED_CACHE_SIZE,
-        //         SHARED_CACHE_PHYS
-        //     );
-        //     shared_cache_data = cache_buf;
-        // } else {
-        //     kprintln!("Failed to read shared cache from disk");
-        // }
-
-        // Initialize VFS from disk (at 400MB offset)
         kprintln!("Initializing VFS from disk...");
         let blk_shared = alloc::sync::Arc::new(spin::Mutex::new(blk));
         let hfsfs = hfsfs::HfsFs::new(blk_shared, 400 * 1024 * 1024);
@@ -120,7 +98,7 @@ pub extern "C" fn kmain() {
         let mut file = vfs::open("/sbin/launchd").expect("Failed to open launchd");
         kprintln!("Reading /sbin/launchd ({} bytes)...", file.size());
         let data = file.read_to_end();
-        if data.len() >= 16 {
+        if data.len() >= 320 {
             kprintln!(
                 "launchd header: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                 data[0],
@@ -132,6 +110,30 @@ pub extern "C" fn kmain() {
                 data[6],
                 data[7]
             );
+            kprintln!("launchd at 256:");
+            for i in 0..4 {
+                let off = 256 + i * 16;
+                kprintln!(
+                    "  {:03x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                    off,
+                    data[off + 0],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                    data[off + 4],
+                    data[off + 5],
+                    data[off + 6],
+                    data[off + 7],
+                    data[off + 8],
+                    data[off + 9],
+                    data[off + 10],
+                    data[off + 11],
+                    data[off + 12],
+                    data[off + 13],
+                    data[off + 14],
+                    data[off + 15]
+                );
+            }
         }
         data
     };
@@ -140,7 +142,7 @@ pub extern "C" fn kmain() {
         let mut file = vfs::open("/usr/lib/dyld").expect("Failed to open dyld");
         kprintln!("Reading /usr/lib/dyld ({} bytes)...", file.size());
         let data = file.read_to_end();
-        if data.len() >= 16 {
+        if data.len() >= 320 {
             kprintln!(
                 "dyld header: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                 data[0],
@@ -151,6 +153,38 @@ pub extern "C" fn kmain() {
                 data[5],
                 data[6],
                 data[7]
+            );
+            kprintln!("dyld at 256:");
+            for i in 0..4 {
+                let off = 256 + i * 16;
+                kprintln!(
+                    "  {:03x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                    off,
+                    data[off + 0],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                    data[off + 4],
+                    data[off + 5],
+                    data[off + 6],
+                    data[off + 7],
+                    data[off + 8],
+                    data[off + 9],
+                    data[off + 10],
+                    data[off + 11],
+                    data[off + 12],
+                    data[off + 13],
+                    data[off + 14],
+                    data[off + 15]
+                );
+            }
+        } else if data.len() > 0 {
+            kprintln!(
+                "dyld raw header: {:02x} {:02x} {:02x} {:02x}",
+                data[0],
+                data[1],
+                data[2],
+                data[3]
             );
         }
         data

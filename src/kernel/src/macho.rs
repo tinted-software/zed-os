@@ -77,7 +77,22 @@ fn segname_to_str(segname: &[u8; 16]) -> &str {
 
 impl MachOLoader {
     pub fn load(data: &[u8], load_offset: u64) -> Option<Self> {
-        let mach = Mach::parse(data).ok()?;
+        let mach = match Mach::parse(data) {
+            Ok(m) => m,
+            Err(e) => {
+                kprintln!("Mach::parse failed: {:?}. Checking for raw MachO...", e);
+                // If it's a 32-bit binary, Mach::parse might fail if it's not wrapped in a fat binary
+                // or if goblin's Mach::parse is being picky about ARMv7.
+                if let Ok(macho) = MachO::parse(data, 0) {
+                    kprintln!(
+                        "Successfully parsed raw MachO (cputype={:?})",
+                        macho.header.cputype
+                    );
+                    return Self::load_macho(&macho, data, load_offset);
+                }
+                return None;
+            }
+        };
 
         match mach {
             Mach::Binary(macho) => Self::load_macho(&macho, data, load_offset),

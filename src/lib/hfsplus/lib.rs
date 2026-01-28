@@ -15,6 +15,9 @@ use core::fmt;
 use core::marker::PhantomData;
 use spin::Mutex;
 use unicode_normalization::UnicodeNormalization;
+use zlib_rs::c_api::z_stream;
+use zlib_rs::inflate::{InflateConfig, InflateStream, end, inflate, init, reset};
+use zlib_rs::{ReturnCode, Status};
 
 mod hfs_strings;
 pub mod internal;
@@ -226,19 +229,22 @@ pub trait HFSStringTrait:
     fmt::Debug + fmt::Display + Ord + PartialOrd + Eq + PartialEq + Clone + Sized
 {
     fn from_vec(v: Vec<u16>) -> Self;
-    fn as_slice(&self) -> &[u16];
+
+    fn to_vec(&self) -> Vec<u16>;
 }
 
 impl HFSStringTrait for HFSString {
     fn from_vec(v: Vec<u16>) -> Self {
         HFSString(v)
     }
-    fn as_slice(&self) -> &[u16] {
-        &self.0
+
+    fn to_vec(&self) -> Vec<u16> {
+        self.0.clone()
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
+
 pub struct HFSStringBinary(pub Vec<u16>);
 
 impl fmt::Debug for HFSStringBinary {
@@ -250,6 +256,7 @@ impl fmt::Debug for HFSStringBinary {
                 write!(f, "\\u{{{:04X}}}", c)?;
             }
         }
+
         Ok(())
     }
 }
@@ -261,6 +268,7 @@ impl fmt::Display for HFSStringBinary {
                 write!(f, "{}", ch)?;
             }
         }
+
         Ok(())
     }
 }
@@ -281,8 +289,9 @@ impl HFSStringTrait for HFSStringBinary {
     fn from_vec(v: Vec<u16>) -> Self {
         HFSStringBinary(v)
     }
-    fn as_slice(&self) -> &[u16] {
-        &self.0
+
+    fn to_vec(&self) -> Vec<u16> {
+        self.0.clone()
     }
 }
 
@@ -571,6 +580,8 @@ pub struct Fork<F: Read + Seek> {
 
     pub extents: Vec<(u32, u32, u64, u64)>,
 
+    pub decompressed_cache: Option<Arc<Vec<u8>>>,
+
     _phantom: PhantomData<F>,
 }
 
@@ -591,8 +602,42 @@ impl<F: Read + Seek> Clone for Fork<F> {
 
             extents: self.extents.clone(),
 
+            decompressed_cache: self.decompressed_cache.clone(),
+
             _phantom: PhantomData,
         }
+    }
+}
+
+unsafe extern "C" fn zalloc_hfs(
+    _opaque: *mut core::ffi::c_void,
+    items: core::ffi::c_uint,
+    size: core::ffi::c_uint,
+) -> *mut core::ffi::c_void {
+    let size = items as usize * size as usize;
+    let layout = match core::alloc::Layout::from_size_align(size + 16, 16) {
+        Ok(l) => l,
+        Err(_) => return core::ptr::null_mut(),
+    };
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        ptr.cast::<usize>().write(size);
+        ptr.add(16).cast()
+    }
+}
+
+unsafe extern "C" fn zfree_hfs(_opaque: *mut core::ffi::c_void, ptr: *mut core::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let real_ptr = ptr.sub(16);
+        let size = real_ptr.cast::<usize>().read();
+        let layout = core::alloc::Layout::from_size_align(size + 16, 16).unwrap();
+        alloc::alloc::dealloc(real_ptr.cast(), layout);
     }
 }
 
@@ -674,8 +719,175 @@ impl<F: Read + Seek> Fork<F> {
 
             extents,
 
+            decompressed_cache: None,
+
             _phantom: PhantomData,
         })
+    }
+
+    fn decompress_zlib(&self, compressed: &[u8], uncompressed_size: usize) -> Result<Vec<u8>> {
+        let mut strm = z_stream {
+            next_in: compressed.as_ptr() as *mut _,
+            avail_in: compressed.len() as _,
+            zalloc: Some(zalloc_hfs),
+            zfree: Some(zfree_hfs),
+            opaque: core::ptr::null_mut(),
+            ..Default::default()
+        };
+
+        let config = InflateConfig {
+            window_bits: 15, // zlib header
+        };
+
+        let ret = init(&mut strm, config);
+        if ret != ReturnCode::Ok {
+            return Err(Error::InvalidData(format!("inflateInit failed: {:?}", ret)));
+        }
+
+        // Use a reasonable initial buffer if size is unknown or suspicious
+        let mut decompressed = if uncompressed_size > 0 && uncompressed_size < 128 * 1024 * 1024 {
+            vec![0u8; uncompressed_size]
+        } else {
+            vec![0u8; 65536]
+        };
+
+        strm.next_out = decompressed.as_mut_ptr();
+        strm.avail_out = decompressed.len() as _;
+
+        let strm_infl = unsafe { InflateStream::from_stream_mut(&mut strm).unwrap() };
+        let mut accumulated_out = 0usize;
+
+        loop {
+            let ret = unsafe { inflate(strm_infl, zlib_rs::InflateFlush::Finish) };
+
+            accumulated_out += strm.total_out as usize;
+
+            if ret == ReturnCode::StreamEnd {
+                if strm.avail_in > 0 {
+                    // Check if next byte looks like another zlib stream (magic 0x78)
+                    let next_byte = unsafe { *strm.next_in };
+                    if next_byte == 0x78 {
+                        if strm.avail_out == 0 {
+                            let old_len = decompressed.len();
+                            decompressed.resize(old_len + 65536, 0);
+                            strm.next_out =
+                                unsafe { decompressed.as_mut_ptr().add(accumulated_out) };
+                            strm.avail_out = (decompressed.len() - accumulated_out) as _;
+                        }
+                        unsafe { reset(strm_infl) };
+                        // After reset, we must restore the output pointers to the remaining space
+                        strm.next_out = unsafe { decompressed.as_mut_ptr().add(accumulated_out) };
+                        strm.avail_out = (decompressed.len() - accumulated_out) as _;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            if ret == ReturnCode::Ok || ret == ReturnCode::BufError {
+                if strm.avail_out == 0 {
+                    let old_len = decompressed.len();
+                    if old_len >= 128 * 1024 * 1024 {
+                        unsafe { end(strm_infl) };
+                        return Err(Error::InvalidData(String::from(
+                            "Decompressed data exceeds 128MB limit",
+                        )));
+                    }
+                    let grow_by = core::cmp::max(65536, old_len);
+                    decompressed.resize(old_len + grow_by, 0);
+                    strm.next_out = unsafe { decompressed.as_mut_ptr().add(accumulated_out) };
+                    strm.avail_out = (decompressed.len() - accumulated_out) as _;
+                    continue;
+                }
+                // If we got Ok but didn't finish and have space, something is wrong
+                break;
+            }
+
+            unsafe { end(strm_infl) };
+            return Err(Error::InvalidData(format!(
+                "Decompression failed: {:?}",
+                ret
+            )));
+        }
+
+        decompressed.truncate(accumulated_out);
+
+        unsafe { end(strm_infl) };
+        Ok(decompressed)
+    }
+
+    fn decompress_chunked_zlib(&mut self, uncompressed_size: usize) -> Result<Vec<u8>> {
+        // Read number of chunks (Little Endian)
+        let mut num_chunks_buf = [0u8; 4];
+        self.read_exact_internal(&mut num_chunks_buf)?;
+        let num_chunks = u32::from_le_bytes(num_chunks_buf) as usize;
+
+        // Read offsets table (Little Endian)
+        let mut offsets = Vec::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            let mut offset_buf = [0u8; 4];
+            self.read_exact_internal(&mut offset_buf)?;
+            offsets.push(u32::from_le_bytes(offset_buf) as usize);
+        }
+
+        // The offsets are relative to the start of the chunk table (which started after num_chunks)
+        let table_start_pos = self.position - (num_chunks * 4) as u64;
+        let mut decompressed = Vec::with_capacity(if uncompressed_size > 0 {
+            uncompressed_size
+        } else {
+            0
+        });
+
+        for i in 0..num_chunks {
+            let start_offset = offsets[i];
+            let end_offset = if i + 1 < num_chunks {
+                offsets[i + 1]
+            } else {
+                // Last chunk: read until the end of the fork
+                // Actually, the resource length might be better, but we don't have it easily here.
+                // For now, read until end of fork.
+                (self.logical_size - table_start_pos) as usize
+            };
+
+            if end_offset < start_offset {
+                return Err(Error::InvalidData(String::from("Invalid chunk offset")));
+            }
+
+            let compressed_size = end_offset - start_offset;
+            if compressed_size > 0 {
+                let mut compressed_chunk = vec![0u8; compressed_size];
+                self.position = table_start_pos + start_offset as u64;
+                self.read_exact_internal(&mut compressed_chunk)?;
+
+                // Each chunk is independently compressed with Zlib
+                // Each chunk (except the last) decompresses to exactly 64KB (65536 bytes)
+                let chunk_uncompressed_size = if i + 1 < num_chunks {
+                    65536
+                } else if uncompressed_size > decompressed.len() {
+                    uncompressed_size - decompressed.len()
+                } else {
+                    0 // Let decompress_zlib figure it out
+                };
+
+                let mut chunk_decompressed =
+                    self.decompress_zlib(&compressed_chunk, chunk_uncompressed_size)?;
+                decompressed.append(&mut chunk_decompressed);
+            }
+        }
+
+        Ok(decompressed)
+    }
+
+    fn read_to_end(&mut self) -> Result<Vec<u8>> {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = self.read_internal(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
+        Ok(data)
     }
 
     pub fn read_all(&mut self) -> Result<Vec<u8>> {
@@ -687,32 +899,191 @@ impl<F: Read + Seek> Fork<F> {
 
         Ok(buffer)
     }
-}
 
-impl<F: Read + Seek> Read for Fork<F> {
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        if self.logical_size == 0 && !self.extents.is_empty() {
-
-            // Decmpfs compressed file logic was here, but we shifted it to HfsFs::open for now.
+    fn check_compression(&mut self) -> Result<()> {
+        if self.decompressed_cache.is_some() {
+            return Ok(());
         }
 
+        // Only check for compression at the beginning of the file
+        if self.position != 0 {
+            return Ok(());
+        }
+
+        let mut header = [0u8; 16];
+        let bytes_read = self.read_internal(&mut header)?;
+        if bytes_read < 16 {
+            self.position = 0;
+            return Ok(());
+        }
+
+        let magic = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        if magic == 0x636d7066 {
+            // 'cmpf'
+            let compression_type = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+            let uncompressed_size = u64::from_be_bytes([
+                header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+                header[15],
+            ]);
+
+            if compression_type == 1 {
+                let mut uncompressed = vec![0u8; uncompressed_size as usize];
+                self.read_exact_internal(&mut uncompressed)?;
+                self.decompressed_cache = Some(Arc::new(uncompressed));
+                self.logical_size = uncompressed_size;
+                self.position = 0;
+                return Ok(());
+            } else if compression_type == 3 || compression_type == 4 {
+                let compressed = self.read_to_end()?;
+                let decompressed = self.decompress_zlib(&compressed, uncompressed_size as usize)?;
+                self.decompressed_cache = Some(Arc::new(decompressed));
+                self.logical_size = uncompressed_size;
+                self.position = 0;
+                return Ok(());
+            } else if compression_type == 5 {
+                let decompressed = self.decompress_chunked_zlib(uncompressed_size as usize)?;
+                self.decompressed_cache = Some(Arc::new(decompressed));
+                self.logical_size = uncompressed_size;
+                self.position = 0;
+                return Ok(());
+            }
+        } else if header[0] == 0x00 && header[1] == 0x00 && header[2] == 0x01 && header[3] == 0x00 {
+            // Resource Fork header (AppleDouble / Resource Manager).
+            // data_offset is at 0: 00 00 01 00 = 256.
+            let data_offset = 256;
+
+            // In a resource fork, the data section contains resources.
+            // The first resource starts with a 4-byte length.
+            self.position = data_offset as u64;
+            let mut res_length_buf = [0u8; 4];
+            if self.read_internal(&mut res_length_buf)? == 4 {
+                let _res_length = u32::from_be_bytes(res_length_buf);
+
+                // Now we are at the start of the resource data (cmpf header or raw type)
+                let mut resource_header = [0u8; 16];
+                if self.read_internal(&mut resource_header)? == 16 {
+                    let magic = u32::from_be_bytes([
+                        resource_header[0],
+                        resource_header[1],
+                        resource_header[2],
+                        resource_header[3],
+                    ]);
+
+                    let (compression_type, uncompressed_size, header_size) = if magic == 0x636d7066
+                    {
+                        (
+                            u32::from_be_bytes([
+                                resource_header[4],
+                                resource_header[5],
+                                resource_header[6],
+                                resource_header[7],
+                            ]),
+                            u64::from_be_bytes([
+                                resource_header[8],
+                                resource_header[9],
+                                resource_header[10],
+                                resource_header[11],
+                                resource_header[12],
+                                resource_header[13],
+                                resource_header[14],
+                                resource_header[15],
+                            ]),
+                            16usize,
+                        )
+                    } else if (resource_header[0] == 0x03
+                        || resource_header[0] == 0x04
+                        || resource_header[0] == 0x05)
+                        && resource_header[1] == 0x00
+                        && resource_header[2] == 0x00
+                        && resource_header[3] == 0x00
+                    {
+                        // Raw Type 3/4/5 header
+                        let raw_type = resource_header[0] as u32;
+                        let raw_header_size = u32::from_le_bytes([
+                            resource_header[4],
+                            resource_header[5],
+                            resource_header[6],
+                            resource_header[7],
+                        ]) as usize;
+                        let raw_uncompressed_size = u32::from_le_bytes([
+                            resource_header[8],
+                            resource_header[9],
+                            resource_header[10],
+                            resource_header[11],
+                        ]) as u64;
+                        (
+                            raw_type,
+                            raw_uncompressed_size,
+                            if raw_header_size >= 4 && raw_header_size <= 256 {
+                                raw_header_size
+                            } else {
+                                4
+                            },
+                        )
+                    } else {
+                        (0, 0, 0)
+                    };
+
+                    if compression_type == 3 || compression_type == 4 {
+                        self.position = (data_offset + 4 + header_size) as u64;
+                        let compressed = self.read_to_end()?;
+                        if let Ok(decompressed) =
+                            self.decompress_zlib(&compressed, uncompressed_size as usize)
+                        {
+                            self.decompressed_cache = Some(Arc::new(decompressed));
+                            self.logical_size =
+                                self.decompressed_cache.as_ref().unwrap().len() as u64;
+                            self.position = 0;
+                            return Ok(());
+                        }
+                    } else if compression_type == 5 {
+                        self.position = (data_offset + 4 + header_size) as u64;
+                        if let Ok(decompressed) =
+                            self.decompress_chunked_zlib(uncompressed_size as usize)
+                        {
+                            self.decompressed_cache = Some(Arc::new(decompressed));
+                            self.logical_size =
+                                self.decompressed_cache.as_ref().unwrap().len() as u64;
+                            self.position = 0;
+                            return Ok(());
+                        }
+                    } else {
+                        // Fallback: Check if the resource data ITSELF is a Zlib stream (some files lack headers)
+                        self.position = (data_offset + 4) as u64;
+                        let compressed = self.read_to_end()?;
+                        if compressed.len() > 0 && compressed[0] == 0x78 {
+                            if let Ok(decompressed) = self.decompress_zlib(&compressed, 0) {
+                                self.decompressed_cache = Some(Arc::new(decompressed));
+                                self.logical_size =
+                                    self.decompressed_cache.as_ref().unwrap().len() as u64;
+                                self.position = 0;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.position = 0;
+        Ok(())
+    }
+
+    fn read_internal(&mut self, buffer: &mut [u8]) -> Result<usize> {
         let offset = self.position;
-
         let mut file = self.file.lock();
-
         let block_size = self.block_size;
-
         let mut bytes_read = 0;
 
         for extent in &self.extents {
             let (start_block, _, extent_begin, extent_end) = *extent;
-
-            if offset >= extent_end {
+            if offset + bytes_read as u64 >= extent_end {
                 continue;
             }
 
-            let extent_offset = if offset > extent_begin {
-                offset - extent_begin
+            let current_offset = offset + bytes_read as u64;
+            let extent_offset = if current_offset > extent_begin {
+                current_offset - extent_begin
             } else {
                 0
             };
@@ -722,13 +1093,10 @@ impl<F: Read + Seek> Read for Fork<F> {
             ))?;
 
             let bytes_remaining = buffer.len() - bytes_read;
-
-            let available_in_extent = extent_end - offset - bytes_read as u64; // Corrected available in extent relative to current read progress
-
+            let available_in_extent = extent_end - current_offset;
             let bytes_to_read = core::cmp::min(available_in_extent, bytes_remaining as u64);
 
-            file.read_exact(&mut buffer[bytes_read as usize..bytes_read + bytes_to_read as usize])?;
-
+            file.read_exact(&mut buffer[bytes_read..bytes_read + bytes_to_read as usize])?;
             bytes_read += bytes_to_read as usize;
 
             if bytes_read >= buffer.len() {
@@ -736,67 +1104,45 @@ impl<F: Read + Seek> Read for Fork<F> {
             }
         }
 
-        // Allow short reads (do not error if EOF is reached before buffer is full)
-
         self.position += bytes_read as u64;
+        Ok(bytes_read)
+    }
 
-        // DEBUG: Print first 16 bytes of any file read in kernel
-
-        if self.position == bytes_read as u64 && bytes_read >= 16 {
-
-            // We can't use std::eprintln in kernel (target_os=none).
-
-            // But we want to see this in QEMU logs.
-
-            // The kernel has kprintln!
-
-            // But this is a library.
-        }
-
-        // Handle Decmpfs header if we just read from resource fork
-
-        if self.fork_type == 0xFF && self.position == bytes_read as u64 && bytes_read >= 16 {
-            #[cfg(not(target_os = "none"))]
-
-            std::eprintln!(
-                "DEBUG: Resource fork header: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                buffer[0],
-                buffer[1],
-                buffer[2],
-                buffer[3],
-                buffer[4],
-                buffer[5],
-                buffer[6],
-                buffer[7]
-            );
-
-            let magic = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
-
-            if magic == 0x636d7066 {
-                // 'cmpf'
-
-                let compression_type =
-                    u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-
-                let uncompressed_size = u64::from_be_bytes([
-                    buffer[8], buffer[9], buffer[10], buffer[11], buffer[12], buffer[13],
-                    buffer[14], buffer[15],
-                ]);
-
-                if compression_type == 1 {
-                    // Type 1: Data is inline in the header after the 16 bytes
-
-                    let actual_data_size =
-                        core::cmp::min(bytes_read - 16, uncompressed_size as usize);
-
-                    buffer.copy_within(16..16 + actual_data_size, 0);
-
-                    return Ok(actual_data_size);
+    fn read_exact_internal(&mut self, mut buf: &mut [u8]) -> Result<()> {
+        while !buf.is_empty() {
+            match self.read_internal(buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
                 }
+                Err(e) => return Err(e),
             }
         }
+        if !buf.is_empty() {
+            Err(Error::InvalidData(String::from("Unexpected EOF")))
+        } else {
+            Ok(())
+        }
+    }
+}
 
-        Ok(bytes_read)
+impl<F: Read + Seek> Read for Fork<F> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        self.check_compression()?;
+
+        if let Some(cache) = &self.decompressed_cache {
+            let offset = self.position as usize;
+            if offset >= cache.len() {
+                return Ok(0);
+            }
+            let to_copy = core::cmp::min(buffer.len(), cache.len() - offset);
+            buffer[..to_copy].copy_from_slice(&cache[offset..offset + to_copy]);
+            self.position += to_copy as u64;
+            return Ok(to_copy);
+        }
+
+        self.read_internal(buffer)
     }
 }
 
@@ -807,7 +1153,7 @@ impl<F: Read + Seek> Seek for Fork<F> {
 
             SeekFrom::Current(x) => (self.position as i64 + x) as u64,
 
-            _ => return Err(Error::UnsupportedOperation),
+            SeekFrom::End(x) => (self.logical_size as i64 + x) as u64,
         };
 
         self.position = new_position;
@@ -826,7 +1172,7 @@ fn convert_key(k: CatalogKey<HFSStringBinary>) -> CatalogKey<HFSString> {
     CatalogKey {
         _case_match: k._case_match,
         parent_id: k.parent_id,
-        node_name: HFSString(k.node_name.0),
+        node_name: HFSString(k.node_name.to_vec()),
     }
 }
 
@@ -1000,7 +1346,7 @@ impl<F: Read + Seek> HFSVolume<F> {
                     current_folder_id = f.folderID;
                 }
 
-                CatalogBody::File(f) => {
+                CatalogBody::File(_) => {
                     if i != parts.len() - 1 {
                         return Err(Error::KeyNotFound);
                     }

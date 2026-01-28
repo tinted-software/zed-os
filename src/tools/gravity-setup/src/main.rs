@@ -250,6 +250,54 @@ async fn main() -> Result<(), SetupError> {
                         "Found {}: size={}, res_size={}",
                         path, f.dataFork.logicalSize, f.resourceFork.logicalSize
                     );
+                    if f.dataFork.logicalSize == 0 && f.resourceFork.logicalSize > 0 {
+                        // Scan resource fork for Mach-O magic
+                        let file_clone = vol_lock.file.clone();
+                        let mut fork = hfsplus::Fork::load(
+                            file_clone,
+                            f.fileID,
+                            0xFF,
+                            &*vol_lock,
+                            &f.resourceFork,
+                        )
+                        .unwrap();
+                        let mut data = vec![0u8; f.resourceFork.logicalSize as usize];
+                        let mut total_read = 0;
+                        while total_read < data.len() {
+                            let n =
+                                hfsplus::Read::read(&mut fork, &mut data[total_read..]).unwrap();
+                            if n == 0 {
+                                break;
+                            }
+                            total_read += n;
+                        }
+                        println!("  - Resource fork first 64 bytes:");
+                        for i in 0..min(64, total_read) {
+                            print!("{:02x} ", data[i]);
+                            if (i + 1) % 16 == 0 {
+                                println!();
+                            }
+                        }
+                        println!();
+                        for i in 0..total_read.saturating_sub(4) {
+                            let magic = u32::from_be_bytes([
+                                data[i],
+                                data[i + 1],
+                                data[i + 2],
+                                data[i + 3],
+                            ]);
+                            if magic == 0xfeedface
+                                || magic == 0xcefaedfe
+                                || magic == 0xcafebabe
+                                || magic == 0xbebafeca
+                                || magic == 0xfeedfacf
+                                || magic == 0xcffaedfe
+                                || magic == 0x636d7066
+                            {
+                                println!("  - Found magic {:08x} at offset {}", magic, i);
+                            }
+                        }
+                    }
                 } else {
                     println!("Found {}: (not a file)", path);
                 }
