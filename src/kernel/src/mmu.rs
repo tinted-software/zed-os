@@ -38,7 +38,7 @@ static mut L2_TABLES: [PageTable; 4] = [PageTable([0; 512]); 4];
 // Pool for dynamically allocated L2 and L3 tables
 static mut L2_POOL: [PageTable; 16] = [PageTable([0; 512]); 16];
 static mut L2_ALLOC_IDX: usize = 0;
-static mut L3_POOL: [PageTable; 256] = [PageTable([0; 512]); 256];
+static mut L3_POOL: [PageTable; 2048] = [PageTable([0; 512]); 2048];
 static mut L3_ALLOC_IDX: usize = 0;
 
 pub fn init() {
@@ -117,11 +117,12 @@ pub fn init() {
     // UART is at 0x09000000
     map_range(0x09000000, 0x09000000, 4096, MapPermission::KernelRWDevice);
 
-    // Map PCI ECAM (0x3f000000)
+    // Map PCI ECAM (Virtual 0x20000000 -> Physical 0x40_1000_0000)
+    // Highmem ECAM is 256MB
     map_range(
-        0x3f000000,
-        0x3f000000,
-        0x1000000,
+        0x20000000,
+        0x40_1000_0000,
+        0x10000000,
         MapPermission::KernelRWDevice,
     );
 
@@ -229,7 +230,7 @@ pub fn map_range(vaddr: u64, paddr: u64, size: u64, perm: MapPermission) {
             let l2_entry = (*l2_ptr).0[l2_idx];
             if (l2_entry & DESC_VALID) == 0 {
                 // New table
-                if L3_ALLOC_IDX >= 256 {
+                if L3_ALLOC_IDX >= 2048 {
                     panic!("Out of L3 tables!");
                 }
                 let l3_table_ptr = &mut L3_POOL[L3_ALLOC_IDX];
@@ -250,7 +251,7 @@ pub fn map_range(vaddr: u64, paddr: u64, size: u64, perm: MapPermission) {
 
                 let l3_idx_to_use = L3_ALLOC_IDX;
                 L3_ALLOC_IDX += 1;
-                if L3_ALLOC_IDX >= 256 {
+                if L3_ALLOC_IDX >= 2048 {
                     panic!("Out of L3 tables!");
                 }
 

@@ -2,7 +2,7 @@
   description = "Gravity OS development environment";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
   };
 
@@ -32,19 +32,6 @@
         system:
         let
           pkgs = pkgsFor system;
-          useLld =
-            stdenv:
-            stdenv.override (prev: {
-              allowedRequisites = null;
-              cc = prev.cc.override {
-                bintools = prev.cc.bintools.override {
-                  extraBuildCommands = ''
-                    ln -fs ${pkgs.buildPackages.lld}/bin/* "$out/bin"
-                  '';
-                };
-              };
-            });
-
           nativeCraneLib = crane.mkLib pkgs;
 
           pkgsCross = import nixpkgs {
@@ -75,12 +62,12 @@
         {
           kernel = callPackage ./src/kernel/package.nix {
             craneLib = crossCraneLib;
-            stdenv = useLld pkgsCross.stdenv;
+            stdenv = pkgsCross.stdenv;
           };
 
           dyld = callPackage ./src/lib/dyld/package.nix {
             craneLib = crossCraneLib;
-            stdenv = useLld pkgsCross.stdenv;
+            stdenv = pkgsCross.stdenv;
           };
 
           ipsw = callPackage ./src/tools/ipsw/package.nix {
@@ -160,18 +147,6 @@
         system:
         let
           pkgs = pkgsFor system;
-          useLld =
-            stdenv:
-            stdenv.override (prev: {
-              allowedRequisites = null;
-              cc = prev.cc.override {
-                bintools = prev.cc.bintools.override {
-                  extraBuildCommands = ''
-                    ln -fs ${pkgs.buildPackages.lld}/bin/* "$out/bin"
-                  '';
-                };
-              };
-            });
           nativeCraneLib = crane.mkLib pkgs;
           pkgsCross = import nixpkgs {
             inherit system;
@@ -191,7 +166,6 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.rust-bindgen
-              pkgs.buildPackages.clang
             ];
             buildInputs = [
               pkgs.aws-lc
@@ -206,13 +180,6 @@
               cargoExtraArgs = "--workspace --exclude kernel --exclude dyld";
             }
           );
-
-          crossArtifacts = crossCraneLib.buildDepsOnly (
-            commonArgs
-            // {
-              cargoExtraArgs = "--package kernel --package dyld";
-            }
-          );
         in
         {
           clippy = nativeCraneLib.cargoClippy (
@@ -223,13 +190,66 @@
             }
           );
 
-          clippy-kernel = crossCraneLib.cargoClippy (
+          clippy-kernel = crossCraneLib.buildPackage (
             commonArgs
             // {
-              cargoArtifacts = crossArtifacts;
-              cargoClippyExtraArgs = "--package kernel --package dyld --all-targets -- -D warnings";
+              pname = "clippy-kernel";
+              version = "0.0.1";
+              cargoExtraArgs = "--package kernel --package dyld";
+
+              buildPhaseCargoCommand = ''
+                SYSROOT=$(${pkgsCross.buildPackages.rustc}/bin/rustc --print sysroot)
+                export RUSTFLAGS="-C linker=${pkgsCross.stdenv.cc.targetPrefix}cc -C linker-flavor=gcc -C link-arg=-fuse-ld=lld -C link-arg=-nostdlib --sysroot $SYSROOT"
+                cargo clippy --package kernel --package dyld --target aarch64-unknown-none-softfloat -- -D warnings
+              '';
+
+              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+                pkgs.clippy
+              ];
+              installPhase = "touch $out";
+              doCheck = false;
             }
           );
+        }
+      );
+
+      apps = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+          gravity-setup = self.packages.${system}.gravity-setup;
+          kernel = self.packages.${system}.kernel;
+        in
+        {
+          default = {
+            type = "app";
+            program = toString (
+              pkgs.writeShellScript "run-gravity-os" ''
+                export PATH="${
+                  pkgs.lib.makeBinPath [
+                    gravity-setup
+                    pkgs.qemu
+                    pkgs.openssl
+                    pkgs.curl
+                  ]
+                }:$PATH"
+
+                echo "Running gravity-setup..."
+                gravity-setup --output disk.img --work-dir work
+
+                echo "Running QEMU..."
+                qemu-system-aarch64 \
+                  -machine virt \
+                  -cpu cortex-a57 \
+                  -m 1024 \
+                  -nographic \
+                  -kernel ${kernel}/bin/kernel \
+                  -drive file=disk.img,format=raw,if=none,id=drive0,cache=writeback \
+                  -device virtio-blk-pci,drive=drive0,bootindex=0 \
+                  -device virtio-rng-pci
+              ''
+            );
+          };
         }
       );
     };

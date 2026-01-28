@@ -30,7 +30,7 @@ global_asm!(include_str!("switch.s"));
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() {
-    kprintln!("Hello from GravityOS. Spawning AArch64 processes...");
+    kprintln!("Hello from GravityOS (fixed 2). Spawning AArch64 processes...");
 
     process::init_vectors();
 

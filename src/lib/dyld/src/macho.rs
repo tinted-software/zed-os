@@ -23,12 +23,11 @@ impl<'a> MachOContext<'a> {
 
     pub fn find_symbol(&self, name: &str) -> Option<usize> {
         for sym in self.macho.symbols() {
-            if let Ok((sym_name, nlist)) = sym {
-                if sym_name == name {
-                    if nlist.n_value != 0 {
-                        return Some(nlist.n_value as usize + self.slide);
-                    }
-                }
+            if let Ok((sym_name, nlist)) = sym
+                && sym_name == name
+                && nlist.n_value != 0
+            {
+                return Some(nlist.n_value as usize + self.slide);
             }
         }
         None
@@ -146,7 +145,7 @@ impl<'a> MachOContext<'a> {
                             library_ordinal,
                             libraries,
                         );
-                        seg_offset += (skip + 8) as usize;
+                        seg_offset += skip + 8;
                     }
                 }
                 _ => return Err("Unknown bind opcode"),
@@ -224,7 +223,7 @@ impl<'a> MachOContext<'a> {
                     let skip = decode_uleb128(data, &mut cursor);
                     for _ in 0..count {
                         self.rebase_at(segment_address + seg_offset, slide);
-                        seg_offset += (skip + 8) as usize;
+                        seg_offset += skip + 8;
                     }
                 }
                 _ => return Err("Unknown rebase opcode"),

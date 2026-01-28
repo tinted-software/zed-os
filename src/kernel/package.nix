@@ -8,7 +8,7 @@
 craneLib.buildPackage (
   commonArgs
   // {
-    pname = "zedos-kernel";
+    pname = "gravity-kernel";
     version = "0.1.0";
 
     cargoExtraArgs = "--manifest-path src/kernel/Cargo.toml";

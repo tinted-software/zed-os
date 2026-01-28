@@ -37,8 +37,8 @@ fn cache_invalidate_range(addr: usize, len: usize) {
     }
 }
 
-// QEMU virt PCI ECAM base address
-const PCI_ECAM_BASE: usize = 0x3f00_0000;
+// QEMU virt PCI ECAM base address (mapped to 0x40_1000_0000 physical)
+const PCI_ECAM_BASE: usize = 0x2000_0000;
 
 // PCI config space offsets
 const PCI_VENDOR_ID: usize = 0x00;
@@ -168,7 +168,8 @@ struct VirtioCaps {
 }
 
 fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
-    let status = pci_read16(bus, dev, func, PCI_STATUS);
+    let status_cmd = pci_read32(bus, dev, func, PCI_COMMAND);
+    let status = (status_cmd >> 16) as u16;
     if (status & 0x10) == 0 {
         return None;
     }
@@ -231,11 +232,13 @@ fn pci_assign_bar(bus: u8, dev: u8, func: u8, bar_num: u8) -> u32 {
 fn scan_pci() -> Option<(u8, u8, u8, VirtioCaps)> {
     kprintln!("Virtio: Scanning PCI bus...");
     for dev in 0..32 {
-        let vendor = pci_read16(0, dev, 0, PCI_VENDOR_ID);
+        let id_val = pci_read32(0, dev, 0, PCI_VENDOR_ID);
+        let vendor = (id_val & 0xFFFF) as u16;
+        let device = (id_val >> 16) as u16;
+
         if vendor == 0xFFFF {
             continue;
         }
-        let device = pci_read16(0, dev, 0, PCI_DEVICE_ID);
         kprintln!(
             "PCI: Found device {:04x}:{:04x} at 0:{}:0",
             vendor,
@@ -246,7 +249,8 @@ fn scan_pci() -> Option<(u8, u8, u8, VirtioCaps)> {
             && (device == VIRTIO_BLK_DEVICE_ID_LEGACY || device == VIRTIO_BLK_DEVICE_ID_MODERN)
         {
             kprintln!("Virtio: Found blk device, enabling...");
-            let cmd = pci_read16(0, dev, 0, PCI_COMMAND);
+            let cmd_status = pci_read32(0, dev, 0, PCI_COMMAND);
+            let cmd = (cmd_status & 0xFFFF) as u16;
             pci_write16(0, dev, 0, PCI_COMMAND, cmd | 0x06);
             if let Some(caps) = find_virtio_caps(0, dev, 0) {
                 pci_assign_bar(0, dev, 0, caps.common_cfg_bar);

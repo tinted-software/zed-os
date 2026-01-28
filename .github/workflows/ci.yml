@@ -1,22 +1,33 @@
 name: CI
-on: [push, pull_request]
+on: [pull_request, merge_group]
 
 jobs:
-    build:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v6
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
 
-            - name: Install Nix
-              uses: cachix/install-nix-action@v31
-              with:
-                  nix_path: nixpkgs=channel:nixos-unstable
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
 
-            - name: Build Kernel
-              run: nix build .#kernel
+      - name: Build Kernel
+        run: nix build .#kernel
 
-            - name: Build Host Tools
-              run: |
-                  nix build .#ipsw
-                  nix build .#gravity-setup
-                  nix build .#linker-wrapper
+      - name: Build Host Tools
+        run: |
+          nix build .#gravity-setup
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Run Tests
+        run: nix flake check

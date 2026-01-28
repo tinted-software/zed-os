@@ -10,10 +10,16 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 static HEAP_SPACE: [u8; 1024 * 1024] = [0u8; 1024 * 1024]; // 1MB heap
 
+/// # Safety
+///
+/// Initializes the global allocator with a static heap buffer.
+/// Must be called only once at startup.
 unsafe fn init_heap() {
-    ALLOCATOR
-        .lock()
-        .init(HEAP_SPACE.as_ptr() as *mut u8, HEAP_SPACE.len());
+    unsafe {
+        ALLOCATOR
+            .lock()
+            .init(HEAP_SPACE.as_ptr() as *mut u8, HEAP_SPACE.len())
+    };
 }
 
 mod cache;
@@ -30,7 +36,10 @@ pub struct DyldState<'a> {
 }
 
 impl<'a> DyldState<'a> {
-    pub fn new(mh: *const u8, slide: usize, cache: SharedCache) -> Self {
+    /// # Safety
+    ///
+    /// `mh` must be a valid pointer to a Mach-O header.
+    pub unsafe fn new(mh: *const u8, slide: usize, cache: SharedCache) -> Self {
         let main_ctx =
             unsafe { MachOContext::parse(mh, slide).expect("Failed to parse main Mach-O") };
         Self {
@@ -41,8 +50,12 @@ impl<'a> DyldState<'a> {
     }
 }
 
-#[no_mangle]
-#[link_section = "__TEXT,__text"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "__TEXT,__text")]
+/// # Safety
+///
+/// Entry point for the dynamic linker.
+/// Pointers must be valid.
 pub unsafe extern "C" fn dyld_start(
     mh: *const u8,
     slide: usize,
@@ -51,82 +64,85 @@ pub unsafe extern "C" fn dyld_start(
     _env_ptr: *const *const u8,
     _apple_ptr: *const *const u8,
 ) -> ! {
-    init_heap();
-    print("Hello from Rust dyld!\n");
+    unsafe {
+        init_heap();
+        print("Hello from Rust dyld!\n");
 
-    // Print arguments for verification
-    print("Mach-O Header: ");
-    print_hex(mh as u64);
-    print("\n");
-
-    print("Slide: ");
-    print_hex(slide as u64);
-    print("\n");
-
-    if !argc_ptr.is_null() {
-        print("Argc: ");
-        print_hex(*argc_ptr);
+        // Print arguments for verification
+        print("Mach-O Header: ");
+        print_hex(mh as u64);
         print("\n");
-    }
 
-    // Find shared cache
-    let sc_base = 0x30000000usize;
-    // TODO: Parse apple_ptr to find dyld_shared_cache_base_address
+        print("Slide: ");
+        print_hex(slide as u64);
+        print("\n");
 
-    let cache = SharedCache::from_addr(sc_base).expect("Failed to find shared cache");
-    print("Shared cache found at ");
-    print_hex(sc_base as u64);
-    print("\n");
-
-    let mut state = DyldState::new(mh, slide, cache);
-
-    // Process dependent dylibs
-    for cmd in &state.main_executable.macho.load_commands {
-        if let goblin::mach::load_command::CommandVariant::LoadDylib(dylib_cmd) = &cmd.command {
-            let offset = dylib_cmd.dylib.name as usize;
-            let name_ptr = (mh as *const u8).add(cmd.offset + offset);
-            let mut len = 0;
-            while *name_ptr.add(len) != 0 {
-                len += 1;
-            }
-            let name = core::str::from_utf8_unchecked(core::slice::from_raw_parts(name_ptr, len));
-
-            print("Loading dylib: ");
-            print(name);
+        if !argc_ptr.is_null() {
+            print("Argc: ");
+            print_hex(*argc_ptr);
             print("\n");
+        }
 
-            if let Some(dylib_addr) = state.cache.find_dylib(name) {
-                print("  Found in cache at ");
-                print_hex(dylib_addr as u64);
-                print("\n");
-                // Parse and add to state
-                if let Some(lib_ctx) = MachOContext::parse(dylib_addr, 0) {
-                    // Slide 0 for cache?
-                    state.libraries.push(lib_ctx);
+        // Find shared cache
+        let sc_base = 0x30000000usize;
+        // TODO: Parse apple_ptr to find dyld_shared_cache_base_address
+
+        let cache = SharedCache::from_addr(sc_base).expect("Failed to find shared cache");
+        print("Shared cache found at ");
+        print_hex(sc_base as u64);
+        print("\n");
+
+        let mut state = DyldState::new(mh, slide, cache);
+
+        // Process dependent dylibs
+        for cmd in &state.main_executable.macho.load_commands {
+            if let goblin::mach::load_command::CommandVariant::LoadDylib(dylib_cmd) = &cmd.command {
+                let offset = dylib_cmd.dylib.name as usize;
+                let name_ptr = mh.add(cmd.offset + offset);
+                let mut len = 0;
+                while *name_ptr.add(len) != 0 {
+                    len += 1;
                 }
-            } else {
-                print("  NOT found in cache\n");
+                let name =
+                    core::str::from_utf8_unchecked(core::slice::from_raw_parts(name_ptr, len));
+
+                print("Loading dylib: ");
+                print(name);
+                print("\n");
+
+                if let Some(dylib_addr) = state.cache.find_dylib(name) {
+                    print("  Found in cache at ");
+                    print_hex(dylib_addr as u64);
+                    print("\n");
+                    // Parse and add to state
+                    if let Some(lib_ctx) = MachOContext::parse(dylib_addr, 0) {
+                        // Slide 0 for cache?
+                        state.libraries.push(lib_ctx);
+                    }
+                } else {
+                    print("  NOT found in cache\n");
+                }
             }
         }
-    }
 
-    // Apply relocations
-    state
-        .main_executable
-        .apply_relocations(&state.libraries, &state.cache)
-        .expect("Failed to apply relocations");
+        // Apply relocations
+        state
+            .main_executable
+            .apply_relocations(&state.libraries, &state.cache)
+            .expect("Failed to apply relocations");
 
-    print("Jumping to entry point: ");
-    print_hex(state.main_executable.macho.entry + slide as u64);
-    print("\n");
+        print("Jumping to entry point: ");
+        print_hex(state.main_executable.macho.entry + slide as u64);
+        print("\n");
 
-    let entry: extern "C" fn() =
-        core::mem::transmute(state.main_executable.macho.entry + slide as u64);
-    entry();
+        let entry: extern "C" fn() =
+            core::mem::transmute(state.main_executable.macho.entry + slide as u64);
+        entry();
 
-    loop {
-        // For now, just yield or hang
-        core::arch::asm!("svc #0", in("x8") 0u64);
+        loop {
+            // For now, just yield or hang
+            core::arch::asm!("svc #0", in("x8") 0u64);
+        }
     }
 }
 
@@ -164,61 +180,4 @@ fn panic(_info: &PanicInfo) -> ! {
     loop {
         unsafe { core::arch::asm!("wfe") };
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
-    let mut len = 0;
-    while *s.add(len) != 0 {
-        len += 1;
-    }
-    len
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *dest.add(i) = *src.add(i);
-        i += 1;
-    }
-    dest
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *s.add(i) = c as u8;
-        i += 1;
-    }
-    s
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    if dest < src as *mut u8 {
-        memcpy(dest, src, n)
-    } else {
-        let mut i = n;
-        while i > 0 {
-            i -= 1;
-            *dest.add(i) = *src.add(i);
-        }
-        dest
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let mut i = 0;
-    while i < n {
-        let a = *s1.add(i);
-        let b = *s2.add(i);
-        if a != b {
-            return a as i32 - b as i32;
-        }
-        i += 1;
-    }
-    0
 }
