@@ -183,15 +183,10 @@ impl HfsFs {
         kprintln!("HfsFs: open '{}'", path);
         let vol = self.volume.lock();
         let record = vol.get_path_record(path).ok()?;
-        kprintln!("HfsFs: record found for '{}'", path);
         if let CatalogBody::File(file_info) = record.body {
             let mut fork_data = &file_info.dataFork;
             let mut fork_type = 0;
             if fork_data.logicalSize == 0 && file_info.resourceFork.logicalSize > 0 {
-                kprintln!(
-                    "HfsFs: data fork empty, using resource fork (size {})",
-                    file_info.resourceFork.logicalSize
-                );
                 fork_data = &file_info.resourceFork;
                 fork_type = 0xFF; // Usually resource fork is different type in extents btree, but Fork::load handles it?
                 // Actually, Fork::load takes fork_type. Catalog data fork is 0, resource is 0xFF.

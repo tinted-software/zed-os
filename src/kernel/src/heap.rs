@@ -5,7 +5,7 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub fn init_heap() {
     let heap_start = 0x6000_0000u64;
-    let heap_size = 128 * 1024 * 1024; // 128MiB
+    let heap_size = 512 * 1024 * 1024; // 512MiB
     crate::kprintln!(
         "GRAVITY HEAP: Initializing at {:x} (size {:x})",
         heap_start,

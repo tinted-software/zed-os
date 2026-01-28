@@ -10,4 +10,3 @@ alias(
     name = "setup",
     actual = "//src/tools/gravity-setup:gravity-setup",
 )
-

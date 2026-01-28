@@ -1,6 +1,3 @@
-# Platforms and Config Settings for GravityOS
-
-# Configuration settings for use in select()
 config_setting(
     name = "macos-aarch64",
     constraint_values = [

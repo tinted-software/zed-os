@@ -745,7 +745,7 @@ impl<F: Read + Seek> Fork<F> {
 
         let mut decompressed = vec![
             0u8;
-            if uncompressed_size > 0 && uncompressed_size < 128 * 1024 * 1024 {
+            if uncompressed_size > 0 && uncompressed_size < 512 * 1024 * 1024 {
                 uncompressed_size
             } else {
                 65536
@@ -784,7 +784,7 @@ impl<F: Read + Seek> Fork<F> {
             if ret == ReturnCode::Ok || ret == ReturnCode::BufError {
                 if strm.avail_out == 0 {
                     let old_len = decompressed.len();
-                    if old_len >= 128 * 1024 * 1024 {
+                    if old_len >= 512 * 1024 * 1024 {
                         unsafe { end(strm_infl) };
                         return Err(Error::InvalidData(String::from(
                             "Decompressed data too large",

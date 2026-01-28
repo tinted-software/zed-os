@@ -128,6 +128,11 @@ impl FileHandle {
         self.file.size()
     }
 
+    /// Seek to position
+    pub fn seek(&mut self, pos: u64) {
+        self.file.seek(pos);
+    }
+
     /// Read bytes from file to end
     pub fn read_to_end(&mut self) -> Vec<u8> {
         self.file.read_to_end()

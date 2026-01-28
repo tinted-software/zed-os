@@ -81,14 +81,14 @@ pub extern "C" fn kmain() {
         *pgsize_ptr = 4096;
 
         let sc_addr = 0x3000_0000u32;
-        // Try both 0x28 and 0x38 for shared cache base in CommPage
-        let sc_ptr_28 = &mut crate::mmu::COMMPAGE_STORAGE[0x28] as *mut u8 as *mut u32;
-        *sc_ptr_28 = sc_addr;
-        let sc_ptr_38 = &mut crate::mmu::COMMPAGE_STORAGE[0x38] as *mut u8 as *mut u32;
-        *sc_ptr_38 = sc_addr;
+        // Try all common shared cache base offsets in CommPage
+        for offset in [0x28, 0x38, 0x68, 0x70, 0x88, 0x90] {
+            let sc_ptr = &mut crate::mmu::COMMPAGE_STORAGE[offset] as *mut u8 as *mut u32;
+            *sc_ptr = sc_addr;
+        }
 
         kprintln!(
-            "Populated CommPage at 0xffff0000 with SC address {:x} (offs 0x28, 0x38)",
+            "Populated CommPage at 0xffff0000 with SC address {:x} at multiple offsets",
             sc_addr
         );
     }
@@ -106,21 +106,23 @@ pub extern "C" fn kmain() {
         file.read_to_end()
     };
     kprintln!("Parsing Mach-O binaries...");
-    let main_load_offset = 0x41000000;
+    let main_load_offset = 0; // Use linked address for launchd if possible
     let main_loader = macho::MachOLoader::load(&main_bin, main_load_offset);
     if let Some(loader) = main_loader {
         let mut loader_is_64bit = loader.is_64bit;
-        let (entry, path) = if let Some(dyld_path) = loader.dylinker {
+        let (entry, path, dyld_mh, _dyld_slide) = if let Some(dyld_path) = loader.dylinker {
             kprintln!("Binary requests dylinker: {}", dyld_path);
-            let dyld_load_offset = 0x50000000;
+            let dyld_load_offset = 0x2fe00000;
             let dyld_loader =
                 macho::MachOLoader::load(&dyld_bin, dyld_load_offset).expect("Failed to load dyld");
             loader_is_64bit = dyld_loader.is_64bit;
-            (dyld_loader.entry, dyld_path)
+            (dyld_loader.entry, dyld_path, dyld_loader.header_addr, 0)
         } else {
             (
                 loader.entry + main_load_offset,
                 String::from("/bin/initial"),
+                0,
+                0,
             )
         };
 
@@ -146,25 +148,27 @@ pub extern "C" fn kmain() {
             macho::setup_stack(user_sp_initial, &path, loader.header_addr, loader_is_64bit);
         kprintln!("Stack setup complete. New User SP: {:x}", new_sp);
 
-        // Initial User SP: new_sp points to mh_addr.
-        // Stack:
-        // [new_sp]     : mh_addr
-        // [new_sp + 4] : 1 (argc)
-        // [new_sp + 8] : path_ptr (argv[0])
-        // [new_sp + 12]: 0 (argv[1] NULL)
-        // [new_sp + 16]: 0 (env[0] NULL)
-        // [new_sp + 20]: path_ptr (apple[0])
-        // [new_sp + 24]: 0 (apple[1] NULL)
-
-        // Prepare args for dyld: r0=base, r1=slide, r2=argc_ptr, r3=argv_ptr, r4=env_ptr, r5=apple_ptr
-        let args = [
-            loader.header_addr, // r0: mach_header
-            load_offset,        // r1: slide
-            new_sp + 8,         // r2: argcptr
-            new_sp + 16,        // r3: argvptr
-            new_sp + 32,        // r4: envp
-            new_sp + 40,        // r5: apple
-        ];
+        // Prepare args for dyld bootstrap:
+        // Darwin ARMv7: r0=dyld_mh, r1=slide, r2=&argc, r3=argv, r4=envp, r5=apple
+        let args = if loader_is_64bit {
+            [
+                loader.header_addr,
+                0, // slide
+                new_sp + 8,
+                new_sp + 16,
+                new_sp + 32,
+                new_sp + 40,
+            ]
+        } else {
+            [
+                dyld_mh,     // r0: dyld's own mach_header
+                0,           // r1: dyld's own slide
+                new_sp + 4,  // r2: &argc (sp+4 points to argc=1)
+                new_sp + 8,  // r3: argv
+                new_sp + 16, // r4: envp
+                new_sp + 20, // r5: apple
+            ]
+        };
 
         // Allocate TLS page (4KB), ensuring 4KB alignment
         let (tls_base, tls_size) = {
@@ -184,12 +188,7 @@ pub extern "C" fn kmain() {
             crate::mmu::MapPermission::UserRW,
         );
         kprintln!("Mapped TLS at {:x}", tls_base);
-        // Fill TLS with some pattern if needed, but 0 is usually fine for initial state.
-        // dyld expects [tls] to point to itself? The crash was ldr r1, [r1].
-        // If r1 spans 0, crash. If r1 points to tls_base, ldr r1, [tls_base] loads first word.
-        // We should probably write a pointer to itself at tls_base?
-        // Darwin lazy binding might expect it.
-        // Let's write self-reference.
+        // Fill TLS with self-reference at offset 0
         unsafe {
             core::ptr::write(tls_base as *mut u32, tls_base as u32);
         }

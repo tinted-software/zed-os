@@ -135,12 +135,27 @@ pub fn init() {
 
     // Map CommPage at 0xFFFF0000
     // CommPage needs to be UserRO. Map 16KB (4 pages).
+    populate_commpage();
     map_range(
         0xFFFF0000,
         core::ptr::addr_of!(COMMPAGE_STORAGE) as u64,
         16384,
         MapPermission::UserRO,
     );
+}
+
+fn populate_commpage() {
+    unsafe {
+        let cp = core::ptr::addr_of_mut!(COMMPAGE_STORAGE) as *mut u8;
+        // iOS 5 commpage version 13
+        core::ptr::write(cp.add(0x1E) as *mut u16, 13);
+        // Active CPUs
+        core::ptr::write(cp.add(0x22) as *mut u8, 1);
+        // Physical CPUs
+        core::ptr::write(cp.add(0x23) as *mut u8, 1);
+        // Logical CPUs
+        core::ptr::write(cp.add(0x24) as *mut u8, 1);
+    }
 }
 
 pub static mut COMMPAGE_STORAGE: [u8; 65536] = [0; 65536];
@@ -268,13 +283,16 @@ pub fn map_range(vaddr: u64, paddr: u64, size: u64, perm: MapPermission) {
                 curr_p | DESC_VALID | DESC_PAGE | attr | AF | sh | ap | xn,
             );
 
-            // Debug: verify first mapping
-            if curr_v == start_v {
+            // Debug: verify first and last mapping
+            if curr_v == start_v || curr_v + 0x1000 >= end_v {
                 kprintln!(
-                    "map_range: L3[{}] = {:016x} (phys=curr_p={:x})",
+                    "map_range: v={:x} p={:x} L1={} L2={} L3={} entry={:016x}",
+                    curr_v,
+                    curr_p,
+                    l1_idx,
+                    l2_idx,
                     l3_idx,
-                    core::ptr::read_volatile(&(*l3_ptr).0[l3_idx]),
-                    curr_p
+                    core::ptr::read_volatile(&(*l3_ptr).0[l3_idx])
                 );
             }
 

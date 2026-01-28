@@ -60,25 +60,32 @@ pub fn setup_stack(sp: u64, exec_path: &str, mh_addr: u64, is_64bit: bool) -> u6
         }
         stack_top
     } else {
-        // 32-bit values
+        // 32-bit values for ARMv7 Darwin
+        // Order: mach_header, argc, argv[0...n], NULL, envp[0...m], NULL, apple[0...k], NULL
         let values = [
-            mh_addr as u32,        // mach_header
-            1u32,                  // argc
+            mh_addr as u32,        // mach_header (at sp)
+            1u32,                  // argc (at sp+4)
             string_ptrs[0] as u32, // argv[0]
             0u32,                  // argv[1] (NULL)
             0u32,                  // envp[0] (NULL)
-            string_ptrs[0] as u32, // apple[0]
-            string_ptrs[1] as u32, // apple[1]
-            string_ptrs[2] as u32, // apple[2]
-            0u32,                  // apple[3] (NULL)
+            string_ptrs[0] as u32, // apple[0] (exec path)
+            string_ptrs[1] as u32, // apple[1] (dyld_shared_cache_base_address)
+            string_ptrs[2] as u32, // apple[2] (executable_path)
+            mh_addr as u32,        // apple[3] (mach_header)
+            0u32,                  // apple[4] (NULL)
         ];
 
-        current_sp -= (values.len() * 4) as u64;
-        // Re-align to 16 bytes if required by ABI (Darwin ARMv7 usually 4 or 8, but 16 is safe)
+        // Ensure 16-byte alignment for the whole stack frame
+        let bytes_needed = values.len() * 4;
+        current_sp -= bytes_needed as u64;
         current_sp &= !15;
+
         let stack_top = current_sp;
         unsafe {
-            core::ptr::copy_nonoverlapping(values.as_ptr(), current_sp as *mut u32, values.len());
+            let p = stack_top as *mut u32;
+            for (i, &v) in values.iter().enumerate() {
+                core::ptr::write(p.add(i), v);
+            }
         }
         stack_top
     }
@@ -93,12 +100,11 @@ fn segname_to_str(segname: &[u8; 16]) -> &str {
 
 impl MachOLoader {
     pub fn load(data: &[u8], load_offset: u64) -> Option<Self> {
+        kprintln!("MachOLoader::load: data len {:x}", data.len());
         let mach = match Mach::parse(data) {
             Ok(m) => m,
             Err(e) => {
                 kprintln!("Mach::parse failed: {:?}. Checking for raw MachO...", e);
-                // If it's a 32-bit binary, Mach::parse might fail if it's not wrapped in a fat binary
-                // or if goblin's Mach::parse is being picky about ARMv7.
                 if let Ok(macho) = MachO::parse(data, 0) {
                     kprintln!(
                         "Successfully parsed raw MachO (cputype={:?})",
@@ -114,6 +120,7 @@ impl MachOLoader {
             Mach::Binary(macho) => Self::load_macho(&macho, data, load_offset),
             Mach::Fat(fat) => {
                 let arches = fat.arches().ok()?;
+                kprintln!("Fat MachO found with {} architectures", arches.len());
                 // Prefer arm64 if available, otherwise armv7
                 let arch = arches
                     .iter()
@@ -127,6 +134,12 @@ impl MachOLoader {
                 if let Some(arch) = arch {
                     let offset = arch.offset as usize;
                     let size = arch.size as usize;
+                    kprintln!(
+                        "Selected arch cputype {:x} at offset {:x} size {:x}",
+                        arch.cputype,
+                        offset,
+                        size
+                    );
                     let slice = &data[offset..offset + size];
                     let macho = MachO::parse(slice, 0).ok()?;
                     return Self::load_macho(&macho, slice, load_offset);
@@ -143,6 +156,27 @@ impl MachOLoader {
             is_64bit,
             load_offset
         );
+
+        // Dump first 32 bytes of MachO header
+        if data.len() >= 32 {
+            let p = data.as_ptr() as *const u32;
+            unsafe {
+                kprintln!(
+                    "MachO Header: {:08x} {:08x} {:08x} {:08x}",
+                    core::ptr::read(p),
+                    core::ptr::read(p.add(1)),
+                    core::ptr::read(p.add(2)),
+                    core::ptr::read(p.add(3))
+                );
+                kprintln!(
+                    "              {:08x} {:08x} {:08x} {:08x}",
+                    core::ptr::read(p.add(4)),
+                    core::ptr::read(p.add(5)),
+                    core::ptr::read(p.add(6)),
+                    core::ptr::read(p.add(7))
+                );
+            }
+        }
 
         let mut dylinker = None;
 
@@ -189,10 +223,18 @@ impl MachOLoader {
                 _ => crate::mmu::MapPermission::UserRWX,
             };
 
-            // Map the segment as RW first so kernel can copy data into it
+            // Allocate physical memory for this segment
+            let layout = core::alloc::Layout::from_size_align(mem_size, 4096).unwrap();
+            let phys_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+            if phys_ptr.is_null() {
+                panic!("Failed to allocate physical memory for segment");
+            }
+            let paddr = phys_ptr as u64;
+
+            // Map the segment
             crate::mmu::map_range(
                 vm_addr,
-                vm_addr,
+                paddr,
                 mem_size as u64,
                 crate::mmu::MapPermission::UserRW,
             );
@@ -204,18 +246,8 @@ impl MachOLoader {
                 }
             }
 
-            if mem_size > file_size {
-                unsafe {
-                    core::ptr::write_bytes(
-                        (vm_addr + file_size as u64) as *mut u8,
-                        0,
-                        mem_size - file_size,
-                    );
-                }
-            }
-
             // Now apply final permissions
-            crate::mmu::map_range(vm_addr, vm_addr, mem_size as u64, perm);
+            crate::mmu::map_range(vm_addr, paddr, mem_size as u64, perm);
         }
 
         Some(Self {

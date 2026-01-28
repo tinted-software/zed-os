@@ -25,6 +25,7 @@ pub struct Process {
     pub stack: Vec<u8>,
     pub ipc_space: IpcSpace,
     pub files: Vec<Option<FileHandle>>,
+    pub signal_mask: u32,
 }
 
 impl Process {
@@ -46,38 +47,41 @@ impl Process {
         );
 
         let mut context = CpuContext::default();
-        context.regs[12] = sp; // sp
+        context.regs[11] = sp; // sp
 
         unsafe extern "C" {
             fn kernel_thread_starter();
         }
-        context.regs[11] = kernel_thread_starter as *const () as u64; // x30/lr
+        context.regs[12] = kernel_thread_starter as *const () as u64; // x30/lr
 
-        context.regs[0] = entry_point; // x19
+        let mut actual_entry = entry_point;
+        let mut spsr = 0x3c0u64; // Sets bits 9,8,7,6 (DAIF masked)
+        if !is_64bit {
+            if (entry_point & 1) != 0 {
+                spsr |= 0x20; // T bit (Thumb mode)
+                actual_entry &= !1;
+            }
+            spsr &= !(1 << 9); // Clear E bit for AArch32 Little Endian
+            spsr |= 0x10; // User mode (A32)
+        }
+        context.regs[0] = actual_entry; // x19
         context.regs[1] = user_sp; // x20
+        context.regs[8] = spsr; // x27 (spsr)
         context.regs[9] = tls_base; // x28 -> TLS
         kprintln!(
-            "Process::new: entry={:x}, user_sp={:x} -> regs[0]={:x}, regs[1]={:x}",
+            "Process::new: entry={:x} (actual={:x}), user_sp={:x}, spsr={:x} -> regs[0]={:x}, regs[1]={:x}",
             entry_point,
+            actual_entry,
             user_sp,
+            spsr,
             context.regs[0],
             context.regs[1]
         );
 
-        // Pass up to 6 args in x21..x26
+        // Pass up to 6 args in x21..x26 (context.regs[2..8])
         context.regs[2..(args.len().min(6) + 2)].copy_from_slice(&args[..args.len().min(6)]);
 
-        // SPSR:
-        // AArch64: [9]D [8]A [7]I [6]F (mask bits)
-        // AArch32: [9]E (Endianness: 0=LE, 1=BE) [8]A [7]I [6]F (mask bits)
-        // We want DAIF masked (bits 9,8,7,6 in AArch64)
-        // For AArch32, we want A, I, F masked (bits 8,7,6) and E=0 (Little Endian, bit 9).
-        let mut spsr = 0x3c0u64; // Sets bits 9,8,7,6
-        if !is_64bit {
-            spsr &= !(1 << 9); // Clear E bit for AArch32 Little Endian
-            spsr |= 0x10; // User mode
-        }
-        context.regs[8] = spsr; // x27
+        context.regs[10] = 0; // x29 (frame pointer)
 
         Self {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -85,7 +89,17 @@ impl Process {
             context,
             stack,
             ipc_space: IpcSpace::new(),
-            files: (0..32).map(|_| None).collect(),
+            files: {
+                let mut f = Vec::with_capacity(32);
+                f.push(crate::vfs::open("/dev/random")); // stdin
+                f.push(crate::vfs::open("/dev/random")); // stdout
+                f.push(crate::vfs::open("/dev/random")); // stderr
+                for _ in 3..32 {
+                    f.push(None);
+                }
+                f
+            },
+            signal_mask: 0,
         }
     }
 }

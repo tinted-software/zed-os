@@ -15,9 +15,9 @@ __switch_to:
     str x27, [x0, #64]
     str x28, [x0, #72]
     str x29, [x0, #80]
-    str x30, [x0, #88] /* LR */
-    mov x19, sp
-    str x19, [x0, #96] /* SP */
+    mov x9,  sp
+    str x9,  [x0, #88] /* sp at index 11 */
+    str x30, [x0, #96] /* x30 at index 12 */
 
     /* Restore next context */
     ldr x19, [x1, #0]
@@ -31,9 +31,9 @@ __switch_to:
     ldr x27, [x1, #64]
     ldr x28, [x1, #72]
     ldr x29, [x1, #80]
-    ldr x30, [x1, #88]
-    ldr x9,  [x1, #96]
+    ldr x9,  [x1, #88]
     mov sp, x9
+    ldr x30, [x1, #96]
 
     ret
 
@@ -42,7 +42,8 @@ __switch_to:
  * x19 = user_entry
  * x20 = user_stack
  * x21..x26 = args (x0..x5)
- * x27 = flags (unused for now)
+ * x27 = flags (spsr)
+ * x28 = tls_base
  */
 kernel_thread_starter:
     msr elr_el1, x19
@@ -59,7 +60,7 @@ kernel_thread_starter:
     mov x4, x25
     mov x5, x26
 
-    /* Zero out remaining registers up to x12 (R12) and others */
+    /* Zero out remaining registers */
     mov x6, #0
     mov x7, #0
     mov x8, #0
@@ -73,7 +74,6 @@ kernel_thread_starter:
     mov x18, #0
     
     /* Set TLS (x28 holds tls_base) */
-    /* AArch32 often uses TPIDRRO_EL0 for TLS (Read-Only Thread ID Register) */
     msr tpidr_el0, x28
     msr tpidrro_el0, x28
 

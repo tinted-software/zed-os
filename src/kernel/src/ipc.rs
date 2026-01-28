@@ -27,19 +27,22 @@ impl Port {
 
 pub struct IpcSpace {
     pub ports: BTreeMap<MachPort, Arc<Mutex<Port>>>,
-    // Map port name to (Port, Right)
-    // For now, simplify: we just store the port.
-    // In reality, we need to know what right we have.
-    // But for a single-process/stub implementation, this is fine.
     pub next_name: u32,
 }
 
 impl IpcSpace {
     pub fn new() -> Self {
-        Self {
+        let mut space = Self {
             ports: BTreeMap::new(),
-            next_name: 0x100, // Start user ports at 0x100
+            next_name: 0x200, // Start user ports at 0x200
+        };
+        // Pre-allocate some common ports: 1=host, 2=task, 3=thread
+        for i in 1..=3 {
+            space
+                .ports
+                .insert(i as MachPort, Arc::new(Mutex::new(Port::new())));
         }
+        space
     }
 
     pub fn allocate_port(&mut self) -> MachPort {
@@ -91,13 +94,15 @@ pub fn mach_msg(
     // Read header
     let header = unsafe { core::ptr::read_volatile(msg) };
 
-    // kprintln!("ipc: mach_msg id={} bits={:x} local={:x} remote={:x} opt={:x}",
-    //     header.msgh_id, header.msgh_bits, header.msgh_local_port, header.msgh_remote_port, option);
-
     if (option & MACH_SEND_MSG) != 0 {
-        // Sending
         let dest_name = header.msgh_remote_port;
-        if let Some(port) = space.get_port(dest_name) {
+
+        // Synchronous Host RPCs: Generate and queue a reply immediately
+        if (dest_name == 1 || dest_name == 2 || dest_name == 3)
+            && (3400..3500).contains(&header.msgh_id)
+        {
+            handle_host_rpc(&header, msg, space);
+        } else if let Some(port) = space.get_port(dest_name) {
             let mut p = port.lock();
             // Copy message body
             let size = header.msgh_size as usize;
@@ -105,42 +110,41 @@ pub fn mach_msg(
             unsafe {
                 core::ptr::copy_nonoverlapping(msg as *const u8, buf.as_mut_ptr(), size);
             }
+            // Keep queue size small to avoid heap exhaustion
+            if p.messages.len() > 10 {
+                p.messages.remove(0);
+            }
             p.messages.push(buf);
-            // kprintln!("ipc: sent message to port {:x} (qlen={})", dest_name, p.messages.len());
         } else {
-            // kprintln!("ipc: invalid dest port {:x}", dest_name);
             return MACH_SEND_INVALID_DEST;
         }
     }
 
     if (option & MACH_RCV_MSG) != 0 {
         // Receiving
-        // rcv_name is where we listen.
-        // But mach_msg usually receives on msgh_local_port?
-        // No, the syscall arg `rcv_name` specifies the receive right.
-
-        // kprintln!("ipc: receiving on port {:x}", rcv_name);
-
         if let Some(port) = space.get_port(rcv_name) {
             let mut p = port.lock();
             if let Some(data) = p.messages.pop() {
+                let mut size = data.len();
                 // Copy out
-                if data.len() > rcv_size as usize {
-                    // Message too large
-                    // header.msgh_bits |= MACH_RCV_TOO_LARGE; // bit 10?
-                    // header.msgh_size = data.len() as u32;
-                    // unsafe { core::ptr::write_volatile(msg, header); }
-                    return 0x10004004; // MACH_RCV_TOO_LARGE
+                if size > rcv_size as usize {
+                    // If it's just a few bytes larger, truncate it instead of failing
+                    if size <= (rcv_size as usize + 16) {
+                        size = rcv_size as usize;
+                    } else {
+                        p.messages.push(data); // Put it back
+                        return 0x10004004; // MACH_RCV_TOO_LARGE
+                    }
                 }
 
                 unsafe {
-                    core::ptr::copy_nonoverlapping(data.as_ptr(), msg as *mut u8, data.len());
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), msg as *mut u8, size);
+                    (*msg).msgh_size = size as u32;
+                    (*msg).msgh_local_port = rcv_name;
+                    (*msg).msgh_remote_port = 0; // Kernel
                 }
-                // kprintln!("ipc: received message ({} bytes)", data.len());
                 return MACH_MSG_SUCCESS;
             } else {
-                // No messages
-                // If timeout is 0, return immediately
                 return MACH_RCV_TIMED_OUT;
             }
         } else {
@@ -149,4 +153,75 @@ pub fn mach_msg(
     }
 
     MACH_MSG_SUCCESS
+}
+
+fn handle_host_rpc(header: &MachMsgHeader, _msg: *mut MachMsgHeader, space: &mut IpcSpace) {
+    let reply_port_name = header.msgh_local_port;
+    if let Some(port) = space.get_port(reply_port_name) {
+        let mut p = port.lock();
+        let mut reply = alloc::vec![0u8; 128];
+        let r_hdr = reply.as_mut_ptr() as *mut MachMsgHeader;
+        unsafe {
+            (*r_hdr).msgh_bits = 0x12; // MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0)
+            (*r_hdr).msgh_remote_port = 1; // From Host port
+            (*r_hdr).msgh_local_port = reply_port_name;
+            (*r_hdr).msgh_id = header.msgh_id + 100;
+
+            match header.msgh_id {
+                3409 => {
+                    // host_info
+                    (*r_hdr).msgh_size = 48;
+                    let data_ptr = reply.as_mut_ptr().add(24) as *mut i32;
+                    unsafe {
+                        core::ptr::write_bytes(data_ptr, 0, 24);
+
+                        // host_basic_info (6 fields = 24 bytes)
+                        *data_ptr = 1; // max_cpus
+                        *data_ptr.add(1) = 1; // avail_cpus
+                        *data_ptr.add(2) = 1024 * 1024 * 1024; // memory_size
+                        *data_ptr.add(3) = 12; // cpu_type: ARM
+                        *data_ptr.add(4) = 9; // cpu_subtype: V7
+                        *data_ptr.add(5) = 1; // cpu_threadtype
+                    }
+                }
+                3402 => {
+                    // host_page_size
+                    (*r_hdr).msgh_size = 28;
+                    let data_ptr = reply.as_mut_ptr().add(24) as *mut u32;
+                    *data_ptr = 4096;
+                }
+                3406 => {
+                    // host_get_clock_service
+                    (*r_hdr).msgh_size = 28;
+                    let data_ptr = reply.as_mut_ptr().add(24) as *mut u32;
+                    *data_ptr = 0x104; // Fake clock port
+                }
+                3407 => {
+                    // host_kernel_version
+                    (*r_hdr).msgh_size = 128;
+                    let data_ptr = reply.as_mut_ptr().add(24) as *mut u8;
+                    let ver = b"Darwin Kernel Version 11.0.0: arm-v7; root:xnu-1699.22.73~1/RELEASE_ARM_S5L8940X\0";
+                    core::ptr::copy_nonoverlapping(ver.as_ptr(), data_ptr, ver.len().min(100));
+                }
+                _ => {
+                    (*r_hdr).msgh_size = 24;
+                }
+            }
+        }
+        // Keep queue size small
+        if p.messages.len() > 10 {
+            p.messages.remove(0);
+        }
+        p.messages.push(reply);
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SharedRegionMapping {
+    pub address: u64,
+    pub size: u64,
+    pub file_offset: u64,
+    pub max_prot: u32,
+    pub init_prot: u32,
 }
