@@ -12,22 +12,18 @@ Zed OS is an operating system built with the Zed Editor. It is a Rust-based kern
 
 - Rust nightly toolchain with `aarch64-unknown-none-softfloat` target
 - QEMU (qemu-system-aarch64) for emulation
+- Buck2 and Reindeer
 
 ### Building the Kernel
 
 ```bash
-# Make the rootfs disk
-cargo run -p make-disk
-
 # Build the kernel
-cargo build --package zedos-kernel --target aarch64-unknown-none-softfloat -Zbuild-std=core,alloc
+buck2 build //src/kernel:kernel --target-platforms //platforms:kernel-arm64
 ```
 
 ### Running the Kernel
 
-```bash
-cargo run --package zedos-kernel --target aarch64-unknown-none-softfloat -Zbuild-std=core,alloc
-```
+TODO.
 
 ## Workspace Structure
 

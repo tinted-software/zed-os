@@ -12,6 +12,7 @@ rust_library(
         "third-party//:des",
         "third-party//:cbc",
         "third-party//:cipher",
+        "third-party//:rayon",
     ],
     visibility = ["PUBLIC"],
 )

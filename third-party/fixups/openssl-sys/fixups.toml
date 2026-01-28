@@ -1,0 +1,7 @@
+extra_deps = ["//third-party/bssl:ssl", "//third-party/bssl:crypto"]
+
+[env]
+OPENSSL_NO_VENDOR = "1"
+
+[buildscript]
+run = true

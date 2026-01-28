@@ -46,6 +46,15 @@ fn main() {
                 // Ignore rustc's arch if it passes one, we'll use ours
                 skip_next = true;
             }
+            "-mmacosx-version-min=11.0.0" => {
+                skip_next = true;
+            }
+            "-Wl,-dead_strip" => {
+                skip_next = true;
+            }
+            "-nodefaultlibs" => {
+                skip_next = true;
+            }
             _ => {
                 if arg.starts_with("-fuse-ld=") {
                     continue;

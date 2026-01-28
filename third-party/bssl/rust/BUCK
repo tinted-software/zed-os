@@ -1,0 +1,51 @@
+load("@prelude//:export_exe.bzl", "export_exe")
+
+# TODO: get bindgen-cli binaries everywhere, somehow
+bindgen = 'bindgen'
+
+genrule(
+    name = 'wrapper.rs',
+    out = 'wrapper.rs',
+    srcs = {
+        'rust_wrapper.c': 'third-party//bssl:src[src/rust/bssl-sys/rust_wrapper.c]',
+        'rust_wrapper.h': 'third-party//bssl:src[src/rust/bssl-sys/rust_wrapper.h]',
+        'wrapper.h': 'third-party//bssl:src[src/rust/bssl-sys/wrapper.h]',
+    },
+    cmd = f"""
+      {bindgen} \
+        wrapper.h -o $OUT \
+          --no-derive-default \
+          --enable-function-attribute-detection \
+          --use-core \
+          --default-macro-constant-type=signed \
+          --rustified-enum=point_conversion_form_t \
+          --allowlist-file=".*[[:punct:]]include[[:punct:]]openssl[[:punct:]].*\\.h" \
+          --experimental \
+          --wrap-static-fns \
+        -- -I$(location third-party//bssl:src)/src/include
+    """,
+    visibility = [],
+)
+
+rust_library(
+    name = 'bssl-sys',
+    srcs = [
+        'third-party//bssl:src[src/rust/bssl-sys/src/lib.rs]',
+    ],
+    env = {
+        'BINDGEN_RS_FILE': '$(location :wrapper.rs)',
+    },
+    deps = [
+        'third-party//bssl:ssl'
+    ],
+    rustc_flags = [
+      "--cfg=bindgen_rs_file",
+    ],
+    visibility = ['PUBLIC'],
+)
+
+alias(
+    name = 'rust',
+    actual = ':bssl-sys',
+    visibility = ['PUBLIC'],
+)

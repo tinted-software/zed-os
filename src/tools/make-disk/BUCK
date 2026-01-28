@@ -7,6 +7,8 @@ rust_binary(
         "third-party//:clap",
         "third-party//:tar",
         "third-party//:thiserror",
+        "//src/lib/apple-dmg:apple-dmg",
+        "//src/lib/hfsplus:hfsplus",
     ],
     visibility = ["PUBLIC"],
 )

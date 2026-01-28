@@ -1,0 +1,12 @@
+rust_library(
+    name = "hfsplus",
+    srcs = glob(["*.rs"]),
+    crate_root = "lib.rs",
+    edition = "2024",
+    deps = [
+        "third-party//:byteorder",
+        "third-party//:bitflags",
+        "third-party//:unicode-normalization",
+    ],
+    visibility = ["PUBLIC"],
+)

@@ -1,4 +1,4 @@
-.section .text
+.section __TEXT,__text
 .global vectors
 .global internal_exception_handler
 
@@ -70,7 +70,7 @@ sync_handler:
     mrs x12, sp_el0
     stp x10, x11, [sp, #16 * 16]
     str x12, [sp, #272]
-    
+
     /* Pass trap frame to Rust */
     mov x0, sp
     bl handle_sync_exception

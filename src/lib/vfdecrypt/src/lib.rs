@@ -9,6 +9,7 @@ use des::TdesEde3;
 use des::cipher::block_padding;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
+use rayon::prelude::*;
 use sha1::Sha1;
 
 #[derive(Error, Debug)]
@@ -226,10 +227,47 @@ fn unwrap_v2_header(passphrase: &str, header: &CEncryptedV2PwHeader) -> Result<(
     Ok((aes_key, hmacsha1_key))
 }
 
-pub struct VfDecryptor<R> {
-    input: R,
+#[derive(Clone, Copy)]
+struct VfKeys {
     aes_key: [u8; 16],
     hmac_key: [u8; 20],
+}
+
+impl VfKeys {
+    fn decrypt_chunk(&self, chunk_no: u32, data: &mut [u8]) -> std::io::Result<()> {
+        let n = data.len();
+        if n < 16 {
+            return Ok(());
+        }
+        let decrypt_len = (n / 16) * 16;
+
+        let mut hmac = <Hmac<Sha1> as Mac>::new_from_slice(&self.hmac_key).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("HMAC init error: {}", e))
+        })?;
+        hmac.update(&chunk_no.to_be_bytes());
+        let result = hmac.finalize();
+        let digest = result.into_bytes();
+        let iv = &digest[..16];
+
+        let cipher = Aes128CbcDec::new_from_slices(&self.aes_key, iv).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("AES init error: {}", e))
+        })?;
+
+        cipher
+            .decrypt_padded_mut::<block_padding::NoPadding>(&mut data[..decrypt_len])
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Decryption error: {}", e),
+                )
+            })?;
+        Ok(())
+    }
+}
+
+pub struct VfDecryptor<R> {
+    input: R,
+    keys: VfKeys,
     block_size: usize,
     data_size: u64,
     total_out: u64,
@@ -325,8 +363,7 @@ impl<R: Read + Seek> VfDecryptor<R> {
 
         Ok(Self {
             input,
-            aes_key,
-            hmac_key,
+            keys: VfKeys { aes_key, hmac_key },
             block_size,
             data_size,
             total_out: 0,
@@ -340,6 +377,64 @@ impl<R: Read + Seek> VfDecryptor<R> {
 
     pub fn data_size(&self) -> u64 {
         self.data_size
+    }
+
+    pub fn decrypt_parallel<W: Write>(&mut self, output: &mut W) -> std::io::Result<()> {
+        let batch_size = 4 * 1024 * 1024; // 4MB
+        // Ensure batch size is multiple of block_size
+        let batch_size = if self.block_size > 0 {
+            (batch_size / self.block_size) * self.block_size
+        } else {
+            batch_size
+        };
+        let batch_size = std::cmp::max(batch_size, self.block_size); // At least one block
+
+        let mut buffer = vec![0u8; batch_size];
+
+        loop {
+            // Determine how much to read
+            let max_to_read = if self.hdr_version == 2 {
+                self.data_size.saturating_sub(self.total_out)
+            } else {
+                u64::MAX
+            };
+
+            if max_to_read == 0 {
+                break;
+            }
+
+            let to_read = std::cmp::min(batch_size as u64, max_to_read) as usize;
+
+            // Read into buffer
+            let mut n = 0;
+            while n < to_read {
+                let r = self.input.read(&mut buffer[n..to_read])?;
+                if r == 0 {
+                    break;
+                }
+                n += r;
+            }
+
+            if n == 0 {
+                break;
+            }
+
+            let start_chunk_no = self.chunk_no;
+            let keys = &self.keys;
+
+            let num_chunks = (n + self.block_size - 1) / self.block_size;
+
+            buffer[..n]
+                .par_chunks_mut(self.block_size)
+                .enumerate()
+                .try_for_each(|(i, chunk)| keys.decrypt_chunk(start_chunk_no + i as u32, chunk))?;
+
+            output.write_all(&buffer[..n])?;
+
+            self.chunk_no += num_chunks as u32;
+            self.total_out += n as u64;
+        }
+        Ok(())
     }
 }
 
@@ -355,26 +450,8 @@ impl<R: Read + Seek> Read for VfDecryptor<R> {
                 return Ok(0);
             }
 
-            let mut hmac = <Hmac<Sha1> as Mac>::new_from_slice(&self.hmac_key).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("HMAC init error: {}", e))
-            })?;
-            hmac.update(&self.chunk_no.to_be_bytes());
-            let result = hmac.finalize();
-            let digest = result.into_bytes();
-            let iv = &digest[..16];
-
-            let cipher = Aes128CbcDec::new_from_slices(&self.aes_key, iv).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("AES init error: {}", e))
-            })?;
-
-            cipher
-                .decrypt_padded_mut::<block_padding::NoPadding>(&mut self.buffer[..n])
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Decryption error: {}", e),
-                    )
-                })?;
+            self.keys
+                .decrypt_chunk(self.chunk_no, &mut self.buffer[..n])?;
 
             self.buffer_len =
                 if self.hdr_version == 2 && (self.data_size - self.total_out) < n as u64 {
@@ -402,6 +479,7 @@ pub fn decrypt<Input: Read + Seek, Output: Write>(
     key: &str,
 ) -> Result<()> {
     let mut decryptor = VfDecryptor::new(input, key)?;
-    std::io::copy(&mut decryptor, output)?;
-    Ok(())
+    decryptor
+        .decrypt_parallel(output)
+        .map_err(VfDecryptError::Io)
 }

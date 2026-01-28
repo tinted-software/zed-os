@@ -1,4 +1,4 @@
-.section .text.boot
+.section __TEXT,__text_boot
 .global _start
 
 _start:
@@ -18,15 +18,15 @@ real_start:
     /* Read CPU ID, stop custom cores */
     mrs x0, mpidr_el1
     and x0, x0, #3
-    cbz x0, master
+    cbz x0, 1f
     b   hang
 
-master:
+1:
     /* Initialize BSS */
     ldr x0, =__bss_start
     ldr x1, =__bss_end
     sub x1, x1, x0
-    cbz x1, run_kernel
+    cbz x1, 2f
 
     /* Zero out BSS */
 zero_bss:
@@ -34,7 +34,7 @@ zero_bss:
     sub x1, x1, #8
     cbnz x1, zero_bss
 
-run_kernel:
+2:
     /* Jump to Rust code */
     /* Set stack pointer before jump */
     ldr x0, =0x40800000

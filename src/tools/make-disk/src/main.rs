@@ -1,6 +1,8 @@
+use apple_dmg::DmgReader;
 use clap::Parser;
+use hfsplus::HFSVolume;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -8,14 +10,18 @@ use thiserror::Error;
 pub enum DiskError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
+    #[error("DMG error: {0}")]
+    Dmg(String),
+    #[error("HFS+ error: {0}")]
+    Hfs(String),
 }
 
 #[derive(Parser, Debug)]
 #[command()]
 struct Args {
-    /// Path to iOS root directory
-    #[arg(long, default_value = "/Volumes/Telluride9A405.K48OS")]
-    ios_root: PathBuf,
+    /// Path to iOS rootfs DMG
+    #[arg(long)]
+    ios_dmg: PathBuf,
 
     /// Output disk image path
     #[arg(long, default_value = "disk.img")]
@@ -33,89 +39,90 @@ struct Args {
 fn main() -> Result<(), DiskError> {
     let args = Args::parse();
 
+    println!("Reading DMG {}...", args.ios_dmg.display());
+    let mut dmg = DmgReader::open(&args.ios_dmg).map_err(|e| DiskError::Dmg(e.to_string()))?;
+
+    // Find the HFS+ partition. It's usually the largest one or the one with HFS+ signature.
+    let mut hfs_data = None;
+    for i in 0..dmg.plist().partitions().len() {
+        let data = dmg
+            .partition_data(i)
+            .map_err(|e| DiskError::Dmg(e.to_string()))?;
+        if data.len() > 1024 && (&data[1024..1026] == b"H+" || &data[1024..1026] == b"HX") {
+            hfs_data = Some(data);
+            break;
+        }
+    }
+
+    let hfs_data =
+        hfs_data.ok_or_else(|| DiskError::Hfs("No HFS+ partition found in DMG".to_string()))?;
+    let volume =
+        HFSVolume::load(Cursor::new(hfs_data)).map_err(|e| DiskError::Hfs(format!("{:?}", e)))?;
+
     println!("Creating disk image {}...", args.output.display());
     let mut disk_file = File::create(&args.output)?;
     disk_file.set_len(args.size_mb * 1024 * 1024)?;
 
     println!("Copying shared cache...");
-    let shared_cache_path = args
-        .ios_root
-        .join("System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7");
-    if shared_cache_path.exists() {
-        let mut cache_file = File::open(&shared_cache_path)?;
-        let mut buffer = Vec::new();
-        cache_file.read_to_end(&mut buffer)?;
-        disk_file.write_all(&buffer)?;
-        println!("Shared cache written");
+    let shared_cache_path = "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7";
+    if let Ok(record) = volume.borrow().get_path_record(shared_cache_path) {
+        if let hfsplus::CatalogBody::File(file) = record.body {
+            let mut fork = hfsplus::Fork::load(
+                volume.borrow().file.clone(),
+                file.fileID,
+                0,
+                volume.clone(),
+                &file.dataFork,
+            )
+            .map_err(|e| DiskError::Hfs(e.to_string()))?;
+            let data = fork.read_all().map_err(|e| DiskError::Hfs(e.to_string()))?;
+            disk_file.write_all(&data)?;
+            println!("Shared cache written");
+        }
     } else {
-        println!(
-            "WARNING: Shared cache not found at {}",
-            shared_cache_path.display()
-        );
-        println!("Creating empty placeholder...");
+        println!("WARNING: Shared cache not found at {}", shared_cache_path);
     }
 
     println!("Creating rootfs.tar...");
-    let rootfs_dir = Path::new("rootfs_tmp");
-    if rootfs_dir.exists() {
-        fs::remove_dir_all(rootfs_dir)?;
-    }
-    fs::create_dir_all(rootfs_dir.join("bin"))?;
-    fs::create_dir_all(rootfs_dir.join("usr/lib"))?;
-    fs::create_dir_all(rootfs_dir.join("System/Library"))?;
+    let mut tar_builder = tar::Builder::new(Vec::new());
 
-    if args.ios_root.exists() {
-        let binaries = [
-            ("bin/ls", "bin/ls"),
-            ("bin/cat", "bin/cat"),
-            ("bin/echo", "bin/echo"),
-            ("usr/lib/dyld", "usr/lib/dyld"),
-        ];
+    let binaries = ["/bin/ls", "/bin/cat", "/bin/echo", "/usr/lib/dyld"];
 
-        for (src, dst) in binaries {
-            let src_path = args.ios_root.join(src);
-            if src_path.exists() {
-                fs::copy(&src_path, rootfs_dir.join(dst))?;
+    for path in binaries {
+        if let Ok(record) = volume.borrow().get_path_record(path) {
+            if let hfsplus::CatalogBody::File(file) = record.body {
+                let mut fork = hfsplus::Fork::load(
+                    volume.borrow().file.clone(),
+                    file.fileID,
+                    0,
+                    volume.clone(),
+                    &file.dataFork,
+                )
+                .map_err(|e| DiskError::Hfs(e.to_string()))?;
+                let data = fork.read_all().map_err(|e| DiskError::Hfs(e.to_string()))?;
+
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o755);
+                tar_builder.append_data(
+                    &mut header,
+                    path.trim_start_matches('/'),
+                    Cursor::new(data),
+                )?;
             }
         }
-
-        println!("Copying Frameworks...");
-        let frameworks_src = args.ios_root.join("System/Library/Frameworks");
-        if frameworks_src.exists() {
-            copy_dir_all(
-                &frameworks_src,
-                rootfs_dir.join("System/Library/Frameworks"),
-            )?;
-        }
     }
 
-    let mut tar_builder = tar::Builder::new(Vec::new());
-    tar_builder.append_dir_all(".", rootfs_dir)?;
-    let tar_data = tar_builder.into_inner()?;
+    // Copying Frameworks is complex with this HFS+ lib as it doesn't support recursive walking easily.
+    // For now, let's just skip it or implement a simple walk if possible.
+    // The current lib has get_children_id.
 
     println!("Writing rootfs at {}MB offset", args.rootfs_offset_mb);
+    let tar_data = tar_builder.into_inner()?;
     disk_file.seek(SeekFrom::Start(args.rootfs_offset_mb * 1024 * 1024))?;
     disk_file.write_all(&tar_data)?;
 
     println!("Disk image created: {}", args.output.display());
-
-    // Cleanup
-    fs::remove_dir_all(rootfs_dir)?;
-
     println!("Done!");
-    Ok(())
-}
-
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        }
-    }
     Ok(())
 }

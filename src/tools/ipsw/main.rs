@@ -5,9 +5,10 @@ use std::cmp::min;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use vfdecrypt::decrypt;
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -32,6 +33,30 @@ enum Commands {
         /// Output file path. If not provided, the filename from the URL will be used.
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Extract an IPSW
+    Extract {
+        /// The IPSW file to extract
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Output directory
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Decrypt a file
+    Decrypt {
+        /// Input file
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Output file
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Key/Passphrase
+        #[arg(long)]
+        key: String,
     },
 }
 
@@ -66,6 +91,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             download_ipsw(&download_url, output).await?;
+        }
+        Commands::Extract { input, output } => {
+            println!("Extracting {} to {}...", input.display(), output.display());
+            std::fs::create_dir_all(&output)?;
+            let status = std::process::Command::new("unzip")
+                .arg("-o") // overwrite
+                .arg(&input)
+                .arg("-d")
+                .arg(&output)
+                .status()?;
+
+            if !status.success() {
+                eprintln!("Unzip failed with status: {}", status);
+                std::process::exit(1);
+            }
+            println!("Extraction complete.");
+        }
+        Commands::Decrypt { input, output, key } => {
+            println!("Decrypting {} to {}...", input.display(), output.display());
+            let mut input_file = std::fs::File::open(input)?;
+            let mut output_file = std::fs::File::create(output)?;
+            decrypt(&mut input_file, &mut output_file, &key)?;
+            println!("Decryption complete.");
         }
     }
 

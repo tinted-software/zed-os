@@ -1,0 +1,21 @@
+rust_library(
+    name = "apple-dmg",
+    srcs = glob(["*.rs"]),
+    crate_root = "lib.rs",
+    edition = "2024",
+    deps = [
+        "third-party//:anyhow",
+        "third-party//:byteorder",
+        "third-party//:crc32fast",
+        "third-party//:fatfs",
+        "third-party//:flate2",
+        "third-party//:fscommon",
+        "third-party//:getrandom",
+        "third-party//:gpt",
+        "third-party//:md5",
+        "third-party//:plist",
+        "third-party//:serde",
+        "third-party//:serde_bytes",
+    ],
+    visibility = ["PUBLIC"],
+)

@@ -26,19 +26,19 @@ system_rust_toolchain(
     rustc_flags = [
         "-Cpanic=abort",
         "-Crelocation-model=pic",
-        "-Clink-arg=-fstack-protector",
         "-Cunsafe-allow-abi-mismatch=sanitizer",
-    ],
+    ] + select({
+        "prelude//os/constraints:none": [
+            # TODO: error: unknown unstable option: `build-std`, even with nightly???
+            #"-Zbuild-std=core,alloc",
+            #"-Zsanitizer=kcfi",
+        ],
+        "DEFAULT": [],
+    }),
 )
 
 gravity_cxx_tools(
-    name = "cxx_tools_macos",
-    visibility = ["PUBLIC"],
-)
-
-gravity_cxx_tools(
-    name = "cxx_tools_none",
-    linker_type = "darwin", # Kernel uses Mach-O
+    name = "cxx_tools",
     visibility = ["PUBLIC"],
 )
 
@@ -46,8 +46,8 @@ gravity_cxx_toolchain(
     name = "cxx",
     visibility = ["PUBLIC"],
     _cxx_tools_info = select({
-        "prelude//os/constraints:none": ":cxx_tools_none",
-        "prelude//os/constraints:macos": ":cxx_tools_macos",
+        "prelude//os/constraints:none": ":cxx_tools",
+        "prelude//os/constraints:macos": ":cxx_tools",
         "DEFAULT": ":cxx_tools_macos",
     }),
     linker_executable = select({

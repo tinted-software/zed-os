@@ -27,7 +27,7 @@
   execution_platforms = prelude//platforms:default
 
 [buck2]
-file_watcher = watchman
+#file_watcher = watchman
 test_builds_targets = true
 digest_algorithms = SHA256
 log_total_configured_graph_sketch = true
