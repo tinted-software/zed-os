@@ -411,12 +411,14 @@ impl VirtioBlk {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             write_volatile(self.notify_addr as *mut u16, 0);
             let mut count = 0;
-            while (*self.used).idx == self.last_used_idx {
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                cache_invalidate_range(core::ptr::addr_of!((*self.used).idx) as usize, 2);
-                count += 1;
-                if count > 1000000 {
-                    return false;
+            if (*self.used).idx == self.last_used_idx {
+                loop {
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                    cache_invalidate_range(core::ptr::addr_of!((*self.used).idx) as usize, 2);
+                    count += 1;
+                    if count > 1000000 {
+                        return false;
+                    }
                 }
             }
             self.last_used_idx = (*self.used).idx;

@@ -63,11 +63,7 @@ pub fn open(path: &str) -> Option<FileHandle> {
     let vfs = VFS.lock();
     let vfs = vfs.as_ref()?;
 
-    if let Some(file) = vfs.hfsfs.open(path) {
-        Some(FileHandle { file })
-    } else {
-        None
-    }
+    vfs.hfsfs.open(path).map(|file| FileHandle { file })
 }
 
 use rand_chacha::ChaCha20Rng;

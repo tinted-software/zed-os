@@ -64,19 +64,9 @@ struct Args {
     #[arg(long, default_value_t = 1536)]
     size_mb: u64,
 
-    /// Rootfs offset in MB
-    #[arg(long, default_value_t = 400)]
-    rootfs_offset_mb: u64,
-}
-
-#[derive(Clone, Copy)]
-struct SafePtr(*mut u8);
-unsafe impl Send for SafePtr {}
-unsafe impl Sync for SafePtr {}
-
-struct OffsetFile {
-    file: File,
-    offset: u64,
+    /// CI mode
+    #[arg(long, default_value = "false")]
+    ci: bool,
 }
 
 impl Read for OffsetFile {
@@ -122,111 +112,117 @@ async fn main() -> Result<(), SetupError> {
 
     std::fs::create_dir_all(&args.work_dir)?;
 
-    // 1. Fetch IPSW URL
-    let start = Instant::now();
-    println!(
-        "Step 1: Fetching firmware URL for {} build {}...",
-        args.device, args.build
-    );
-    let ipsw_url = fetch_firmware_url(&args.device, &args.build)
-        .await
-        .map_err(|e| SetupError::Download(e.to_string()))?
-        .ok_or_else(|| SetupError::Other("Firmware not found".to_string()))?;
-    println!("  Done in {:?}", start.elapsed());
+    // cargo build kernel
+    std::process::Command::new("cargo")
+        .arg("build")
+        .arg("-Zbuild-std=core,alloc,compiler_builtins")
+        .arg("-Zbuild-std-features=compiler-builtins-mem")
+        .arg("--target")
+        .arg("aarch64-unknown-none-softfloat")
+        .arg("-p")
+        .arg("kernel")
+        .arg("-p")
+        .arg("dyld")
+        .env(
+            "RUSTFLAGS",
+            "-Zsanitizer=kcfi -Clink-arg=--ld-path=wild -Clinker=clang",
+        )
+        .status()
+        .map_err(|e| SetupError::Other(e.to_string()))?;
 
-    // 2. Download IPSW
-    let ipsw_path = args.work_dir.join("firmware.ipsw");
-    if !ipsw_path.exists() {
-        println!("Step 2: Downloading IPSW...");
-        download_ipsw(&ipsw_url, &ipsw_path, &mp).await?;
-    } else {
-        println!("Step 2: IPSW already downloaded, skipping.");
-    }
-
-    // 3. Extract Rootfs DMG (optimized)
-    let start = Instant::now();
-    let rootfs_dmg_encrypted = args.work_dir.join("rootfs_encrypted.dmg");
-    if !rootfs_dmg_encrypted.exists() {
-        println!("Step 3: Extracting rootfs DMG from IPSW...");
-        let file = File::open(&ipsw_path).map_err(|e| {
-            SetupError::Other(format!(
-                "Failed to open IPSW at {}: {}",
-                ipsw_path.display(),
-                e
-            ))
-        })?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| SetupError::Other(format!("Failed to open IPSW as ZIP: {}", e)))?;
-
-        let mut largest_name = String::new();
-        let mut largest_size = 0;
-        let mut largest_index = 0;
-
-        for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
-            if file.name().ends_with(".dmg") && file.size() > largest_size {
-                largest_size = file.size();
-                largest_name = file.name().to_string();
-                largest_index = i;
-            }
-        }
-
-        if largest_size == 0 {
-            return Err(SetupError::Other("No DMG found in IPSW".to_string()));
-        }
-
+    if !args.ci {
         println!(
-            "  Extracting {} ({} MB)...",
-            largest_name,
-            largest_size / 1024 / 1024
+            "Fetching firmware URL for {} build {}...",
+            args.device, args.build
         );
-        let mut rootfs_zip = archive.by_index(largest_index)?;
-        let mut output = File::create(&rootfs_dmg_encrypted)?;
+        let ipsw_url = fetch_firmware_url(&args.device, &args.build)
+            .await
+            .map_err(|e| SetupError::Download(e.to_string()))?
+            .ok_or_else(|| SetupError::Other("Firmware not found".to_string()))?;
+        println!("  Done in {:?}", start.elapsed());
 
-        let pb = mp.add(ProgressBar::new(largest_size));
-        pb.set_style(ProgressStyle::default_bar()
+        // 2. Download IPSW
+        let ipsw_path = args.work_dir.join("firmware.ipsw");
+        if !ipsw_path.exists() {
+            println!("Downloading IPSW...");
+            download_ipsw(&ipsw_url, &ipsw_path, &mp).await?;
+        } else {
+            println!("IPSW already downloaded, skipping.");
+        }
+
+        // 3. Extract Rootfs DMG (optimized)
+        let rootfs_dmg_encrypted = args.work_dir.join("rootfs_encrypted.dmg");
+        if !rootfs_dmg_encrypted.exists() {
+            println!("Extracting rootfs DMG from IPSW...");
+            let file = File::open(&ipsw_path).map_err(|e| {
+                SetupError::Other(format!(
+                    "Failed to open IPSW at {}: {}",
+                    ipsw_path.display(),
+                    e
+                ))
+            })?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| SetupError::Other(format!("Failed to open IPSW as ZIP: {}", e)))?;
+
+            let mut largest_name = String::new();
+            let mut largest_size = 0;
+            let mut largest_index = 0;
+
+            for i in 0..archive.len() {
+                let file = archive.by_index(i)?;
+                if file.name().ends_with(".dmg") && file.size() > largest_size {
+                    largest_size = file.size();
+                    largest_name = file.name().to_string();
+                    largest_index = i;
+                }
+            }
+
+            if largest_size == 0 {
+                return Err(SetupError::Other("No DMG found in IPSW".to_string()));
+            }
+
+            println!(
+                "Extracting {} ({} MB)...",
+                largest_name,
+                largest_size / 1024 / 1024
+            );
+            let mut rootfs_zip = archive.by_index(largest_index)?;
+            let mut output = File::create(&rootfs_dmg_encrypted)?;
+
+            let pb = mp.add(ProgressBar::new(largest_size));
+            pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
             .unwrap()
             .progress_chars("#>-"));
 
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let n = rootfs_zip.read(&mut buffer)?;
-            if n == 0 {
-                break;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                let n = rootfs_zip.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..n])?;
+                pb.inc(n as u64);
             }
-            output.write_all(&buffer[..n])?;
-            pb.inc(n as u64);
+            pb.finish_with_message("Extraction complete");
+        } else {
+            println!("Rootfs DMG already extracted, skipping.");
         }
-        pb.finish_with_message("Extraction complete");
-        println!("  Done in {:?}", start.elapsed());
-    } else {
-        println!("Step 3: Rootfs DMG already extracted, skipping.");
+
+        // 4. Decrypt Rootfs DMG
+        let rootfs_dmg = args.work_dir.join("rootfs.dmg");
+        if !rootfs_dmg.exists() {
+            println!("Decrypting rootfs DMG...");
+            let mut input = File::open(&rootfs_dmg_encrypted)?;
+            let mut output = File::create(&rootfs_dmg)?;
+            decrypt(&mut input, &mut output, &args.key)
+                .map_err(|e| SetupError::Decrypt(e.to_string()))?;
+        } else {
+            println!("Rootfs DMG already decrypted, skipping.");
+        }
     }
 
-    // 4. Decrypt Rootfs DMG
-    let start = Instant::now();
-    let rootfs_dmg = args.work_dir.join("rootfs.dmg");
-    if !rootfs_dmg.exists() {
-        println!("Step 4: Decrypting rootfs DMG...");
-        let mut input = File::open(&rootfs_dmg_encrypted)?;
-        let mut output = File::create(&rootfs_dmg)?;
-        decrypt(&mut input, &mut output, &args.key)
-            .map_err(|e| SetupError::Decrypt(e.to_string()))?;
-        println!("  Done in {:?}", start.elapsed());
-    } else {
-        println!("Step 4: Rootfs DMG already decrypted, skipping.");
-    }
-
-    println!(
-        "Step 5: Creating final disk image {}...",
-        args.output.display()
-    );
-    create_disk_image(&rootfs_dmg, &args, &mp)?;
-    println!("  Done in {:?}", start.elapsed());
-
-    println!("Total time: {:?}", total_start.elapsed());
-    println!("Success! Disk image created at {}", args.output.display());
+    println!("✨ Done in {:?}", total_start.elapsed());
     Ok(())
 }
 
@@ -258,109 +254,5 @@ async fn download_ipsw(url: &str, output: &Path, mp: &MultiProgress) -> Result<(
     }
 
     pb.finish_with_message("Download complete");
-    Ok(())
-}
-
-fn create_disk_image(rootfs_dmg: &Path, args: &Args, mp: &MultiProgress) -> Result<(), SetupError> {
-    let mut dmg = DmgReader::open(rootfs_dmg).map_err(|e| SetupError::Dmg(e.to_string()))?;
-
-    // Find HFS+ partition
-    let mut hfs_table = None;
-    for i in 0..dmg.plist().partitions().len() {
-        let table = dmg
-            .partition_table(i)
-            .map_err(|e| SetupError::Dmg(e.to_string()))?;
-        if let Some(chunk) = table
-            .chunks
-            .iter()
-            .find(|c| c.ty() != Some(ChunkType::Comment))
-        {
-            let mut reader = dmg
-                .sector(chunk)
-                .map_err(|e| SetupError::Dmg(e.to_string()))?;
-            let mut header = vec![0u8; 2048];
-            let _ = reader.read_exact(&mut header);
-            if header.len() >= 1026
-                && (&header[1024..1026] == b"H+" || &header[1024..1026] == b"HX")
-            {
-                hfs_table = Some(table);
-                break;
-            }
-        }
-    }
-
-    let hfs_table = hfs_table.unwrap();
-
-    let output_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&args.output)?;
-    output_file.set_len(args.size_mb * 1024 * 1024)?;
-
-    let mut mmap = unsafe { MmapMut::map_mut(&output_file)? };
-    let mmap_ptr = SafePtr(mmap.as_mut_ptr());
-
-    println!("  Parallel rootfs decompression...");
-    let rootfs_offset = (args.rootfs_offset_mb * 1024 * 1024) as usize;
-    let dmg_file = File::open(rootfs_dmg)?;
-
-    let pb = mp.add(ProgressBar::new(hfs_table.chunks.len() as u64));
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
-        .unwrap()
-        .progress_chars("#>-"));
-
-    hfs_table
-        .chunks
-        .par_iter()
-        .try_for_each(|chunk| -> Result<(), SetupError> {
-            let p = mmap_ptr;
-            let ty = chunk
-                .ty()
-                .ok_or_else(|| SetupError::Dmg("Unknown chunk type".to_string()))?;
-            let output_pos = rootfs_offset + (chunk.sector_number * 512) as usize;
-
-            match ty {
-                ChunkType::Zero | ChunkType::Ignore => {}
-                ChunkType::Raw => {
-                    let mut data = vec![0u8; chunk.compressed_length as usize];
-                    dmg_file.read_exact_at(&mut data, chunk.compressed_offset)?;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            data.as_ptr(),
-                            p.0.add(output_pos),
-                            data.len(),
-                        );
-                    }
-                }
-                ChunkType::Zlib => {
-                    let mut compressed = vec![0u8; chunk.compressed_length as usize];
-                    dmg_file.read_exact_at(&mut compressed, chunk.compressed_offset)?;
-                    let mut decoder = ZlibDecoder::new(&compressed[..]);
-                    let mut decompressed = Vec::with_capacity((chunk.sector_count * 512) as usize);
-                    decoder.read_to_end(&mut decompressed)?;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            decompressed.as_ptr(),
-                            p.0.add(output_pos),
-                            decompressed.len(),
-                        );
-                    }
-                }
-                _ => {}
-            }
-            // Increment periodically to avoid too much lock contention on MultiProgress
-            if chunk.sector_number % 100 == 0 {
-                pb.inc(100);
-            }
-            Ok(())
-        })?;
-    pb.set_position(hfs_table.chunks.len() as u64);
-    pb.finish_with_message("Rootfs decompressed");
-    mmap.flush()?;
-    drop(mmap);
-
     Ok(())
 }

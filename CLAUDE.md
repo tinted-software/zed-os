@@ -10,18 +10,19 @@ GravityOS is a Rust-based operating system and kernel targeting ARM64 (aarch64-u
 
 ### Prerequisites
 
-- Nix
+- Rust nightly
+- QEMU (qemu-system-aarch64)
 
 ### Building the Kernel
 
 ```bash
-nix build -v .#kernel
+cargo build --target aarch64-unknown-none-softfloat -p kernel
 ```
 
 ### Running the Kernel
 
 ```bash
-nix run
+cargo run -p gravity-setup
 ```
 
 ## Workspace Structure

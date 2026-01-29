@@ -14,4 +14,4 @@ spin = { workspace = true }
 rand_chacha = { workspace = true }
 rand_core = { workspace = true }
 hfsplus = { path = "../lib/hfsplus" }
-zstd = { workspace = true }
+zstd-safe = { workspace = true }

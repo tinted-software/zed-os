@@ -62,7 +62,7 @@ pub fn init() {
 
                 // Skip mapping PCI space (0x10000000 - 0x40000000) as Normal memory
                 // We will map these specifically as Device memory later
-                if paddr >= 0x10000000 && paddr < 0x40000000 {
+                if (0x10000000..0x40000000).contains(&paddr) {
                     continue;
                 }
 
@@ -152,11 +152,11 @@ fn populate_commpage() {
         // iOS 5 commpage version 13
         core::ptr::write(cp.add(0x1E) as *mut u16, 13);
         // Active CPUs
-        core::ptr::write(cp.add(0x22) as *mut u8, 1);
+        core::ptr::write(cp.add(0x22), 1);
         // Physical CPUs
-        core::ptr::write(cp.add(0x23) as *mut u8, 1);
+        core::ptr::write(cp.add(0x23), 1);
         // Logical CPUs
-        core::ptr::write(cp.add(0x24) as *mut u8, 1);
+        core::ptr::write(cp.add(0x24), 1);
     }
 }
 

@@ -4,11 +4,11 @@
 // Enable alloc crate
 extern crate alloc;
 
+mod binary_loader;
 mod block;
 mod heap;
 mod hfsfs;
 mod ipc;
-mod macho;
 mod mem;
 mod mmu;
 mod process;
@@ -20,7 +20,6 @@ mod zalloc;
 
 use crate::scheduler::{Process, SCHEDULER};
 use alloc::string::String;
-use alloc::vec;
 use core::arch::asm;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -117,7 +116,7 @@ pub extern "C" fn kmain() {
     let mut main_load_offset = 0;
 
     // Temporary load to check flags
-    if let Some(temp_loader) = macho::BinaryLoader::load(&main_bin, 0) {
+    if let Some(temp_loader) = binary_loader::BinaryLoader::load(&main_bin, 0) {
         if (temp_loader.flags & 0x200000) != 0 {
             // MH_PIE
             kprintln!("Main binary is PIE. Sliding to 0x40000000 to avoid Page Zero.");
@@ -127,15 +126,15 @@ pub extern "C" fn kmain() {
         }
     }
 
-    let main_loader = macho::BinaryLoader::load(&main_bin, main_load_offset);
+    let main_loader = binary_loader::BinaryLoader::load(&main_bin, main_load_offset);
     if let Some(loader) = main_loader {
         let mut loader_is_64bit = loader.is_64bit;
         let (entry, path, dyld_mh, main_mh, _dyld_slide) = if let Some(dyld_path) = loader.dylinker
         {
             kprintln!("Binary requests dylinker: {}", dyld_path);
             let dyld_load_offset = 0;
-            let dyld_loader =
-                macho::BinaryLoader::load(dyld_bin, dyld_load_offset).expect("Failed to load dyld");
+            let dyld_loader = binary_loader::BinaryLoader::load(&dyld_bin, dyld_load_offset)
+                .expect("Failed to load dyld");
             loader_is_64bit = dyld_loader.is_64bit;
             (
                 dyld_loader.entry,
@@ -228,7 +227,7 @@ pub extern "C" fn kmain() {
         }
 
         kprintln!("Initial User SP: {:x}", user_sp_initial);
-        let new_sp = macho::setup_stack(
+        let new_sp = binary_loader::setup_stack(
             user_sp_initial,
             &path,
             dyld_mh,

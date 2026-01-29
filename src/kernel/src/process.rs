@@ -331,13 +331,12 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
 
             let mut sched = SCHEDULER.lock();
             let mut read_len = 0;
-            if let Some(proc) = sched.current_process.as_mut() {
-                if fd < proc.files.len() {
-                    if let Some(handle) = &mut proc.files[fd] {
-                        let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                        read_len = handle.read(slice);
-                    }
-                }
+            if let Some(proc) = sched.current_process.as_mut()
+                && fd < proc.files.len()
+                && let Some(handle) = &mut proc.files[fd]
+            {
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+                read_len = handle.read(slice);
             }
             frame.x[0] = read_len as u64;
             frame.spsr &= !0x20000000;
@@ -387,10 +386,10 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
             // close(fd)
             let fd = frame.x[0] as usize;
             let mut sched = SCHEDULER.lock();
-            if let Some(proc) = sched.current_process.as_mut() {
-                if fd < proc.files.len() {
-                    proc.files[fd] = None;
-                }
+            if let Some(proc) = sched.current_process.as_mut()
+                && fd < proc.files.len()
+            {
+                proc.files[fd] = None;
             }
             frame.x[0] = 0;
             frame.spsr &= !0x20000000;
@@ -401,7 +400,7 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
                 let sched = SCHEDULER.lock();
                 sched.current_process.as_ref().map(|p| p.pid).unwrap_or(0)
             };
-            frame.x[0] = pid as u64;
+            frame.x[0] = pid;
             frame.spsr &= !0x20000000;
         }
         24 => {
@@ -541,13 +540,12 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
 
             let mut sched = SCHEDULER.lock();
             let mut read_len = 0;
-            if let Some(proc) = sched.current_process.as_mut() {
-                if fd < proc.files.len() {
-                    if let Some(handle) = &mut proc.files[fd] {
-                        let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                        read_len = handle.read(slice);
-                    }
-                }
+            if let Some(proc) = sched.current_process.as_mut()
+                && fd < proc.files.len()
+                && let Some(handle) = &mut proc.files[fd]
+            {
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+                read_len = handle.read(slice);
             }
             frame.x[0] = read_len as u64;
             frame.spsr &= !0x20000000;
@@ -590,13 +588,13 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
                 let mut sched = SCHEDULER.lock();
                 if let Some(proc) = sched.current_process.as_mut() {
                     let fd = fd as usize;
-                    if fd < proc.files.len() {
-                        if let Some(handle) = &mut proc.files[fd] {
-                            let slice = unsafe {
-                                core::slice::from_raw_parts_mut(map_addr as *mut u8, len as usize)
-                            };
-                            handle.read(slice);
-                        }
+                    if fd < proc.files.len()
+                        && let Some(handle) = &mut proc.files[fd]
+                    {
+                        let slice = unsafe {
+                            core::slice::from_raw_parts_mut(map_addr as *mut u8, len as usize)
+                        };
+                        handle.read(slice);
                     }
                 }
             }
@@ -844,19 +842,18 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
             let fd = frame.x[0] as usize;
             let stat_ptr = frame.x[1] as *mut u8;
             let mut sched = SCHEDULER.lock();
-            if let Some(proc) = sched.current_process.as_mut() {
-                if fd < proc.files.len() {
-                    if let Some(handle) = &proc.files[fd] {
-                        unsafe {
-                            core::ptr::write_bytes(stat_ptr, 0, 100);
-                            *(stat_ptr.add(64) as *mut u64) = handle.size();
-                            *(stat_ptr.add(4) as *mut u16) = 0o100644;
-                        }
-                        frame.x[0] = 0;
-                        frame.spsr &= !0x20000000;
-                        return;
-                    }
+            if let Some(proc) = sched.current_process.as_mut()
+                && fd < proc.files.len()
+                && let Some(handle) = &proc.files[fd]
+            {
+                unsafe {
+                    core::ptr::write_bytes(stat_ptr, 0, 100);
+                    *(stat_ptr.add(64) as *mut u64) = handle.size();
+                    *(stat_ptr.add(4) as *mut u16) = 0o100644;
                 }
+                frame.x[0] = 0;
+                frame.spsr &= !0x20000000;
+                return;
             }
             frame.x[0] = 9; // EBADF
             frame.spsr |= 0x20000000;
@@ -917,121 +914,86 @@ fn handle_a32_syscall_internal(frame: &mut TrapFrame, syscall_num: i32) {
             dump_mem(frame.x[2], count as u64 * 32);
 
             let mut sched = SCHEDULER.lock();
-            if let Some(proc) = sched.current_process.as_mut() {
-                if fd < proc.files.len() {
-                    if let Some(handle) = &mut proc.files[fd] {
-                        let file_size = handle.size();
-                        for i in 0..count {
-                            let m = unsafe { core::ptr::read(mappings.add(i)) };
-                            kprintln!(
-                                "  Mapping SR segment: addr={:x} size={:x} off={:x} prot={:x}",
-                                m.address,
-                                m.size,
-                                m.file_offset,
-                                m.init_prot
-                            );
+            if let Some(proc) = sched.current_process.as_mut()
+                && fd < proc.files.len()
+                && let Some(handle) = &mut proc.files[fd]
+            {
+                let file_size = handle.size();
+                for i in 0..count {
+                    let m = unsafe { core::ptr::read(mappings.add(i)) };
+                    kprintln!(
+                        "  Mapping SR segment: addr={:x} size={:x} off={:x} prot={:x}",
+                        m.address,
+                        m.size,
+                        m.file_offset,
+                        m.init_prot
+                    );
 
-                            // Only allocate/load what's actually in the file
-                            let data_size_unaligned = if m.file_offset < file_size {
-                                core::cmp::min(m.size, file_size - m.file_offset)
-                            } else {
-                                0
-                            };
-                            let mut data_size =
-                                core::cmp::min(m.size, (data_size_unaligned + 4095) & !4095);
+                    // Only allocate/load what's actually in the file
+                    let data_size_unaligned = if m.file_offset < file_size {
+                        core::cmp::min(m.size, file_size - m.file_offset)
+                    } else {
+                        0
+                    };
+                    let mut data_size =
+                        core::cmp::min(m.size, (data_size_unaligned + 4095) & !4095);
 
-                            // CLIP: Do not map into kernel space (> 1GB)
-                            let max_user_addr = 0x40000000;
-                            if m.address >= max_user_addr {
-                                kprintln!("  Skipping segment outside user range: {:x}", m.address);
-                                continue;
-                            }
-                            if m.address + data_size > max_user_addr {
-                                kprintln!(
-                                    "  Clipping data part from {:x} to {:x}",
-                                    m.address + data_size,
-                                    max_user_addr
-                                );
-                                data_size = max_user_addr - m.address;
-                            }
-
-                            // Map the data part (file-backed)
-                            if data_size > 0 {
-                                let alloc_size = (data_size + 4095) & !4095;
-                                let layout =
-                                    core::alloc::Layout::from_size_align(alloc_size as usize, 4096)
-                                        .unwrap();
-                                let phys_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-                                if phys_ptr.is_null() {
-                                    panic!(
-                                        "Failed to allocate physical memory for shared region segment (data size={:x})",
-                                        data_size
-                                    );
-                                }
-                                let paddr = phys_ptr as u64;
-
-                                // Read data from shared cache file into the physical buffer
-                                handle.seek(m.file_offset);
-                                let total_to_read =
-                                    core::cmp::min(data_size_unaligned, data_size) as usize;
-                                let mut offset = 0;
-                                while offset < total_to_read {
-                                    let chunk_size =
-                                        core::cmp::min(1024 * 1024, total_to_read - offset);
-                                    let slice = unsafe {
-                                        core::slice::from_raw_parts_mut(
-                                            (phys_ptr as usize + offset) as *mut u8,
-                                            chunk_size,
-                                        )
-                                    };
-                                    handle.read(slice);
-                                    offset += chunk_size;
-                                }
-
-                                // Now map the data part to the user's address
-                                crate::mmu::map_range(
-                                    m.address,
-                                    paddr,
-                                    data_size,
-                                    crate::mmu::MapPermission::UserRWX,
-                                );
-                            }
-
-                            // If there is virtual padding (BSS/Zero-fill), map it as zeroed pages
-                            // DISABLED: This was overwriting adjacent segments due to large padding ranges in Segment 4
-                            /*
-                            if m.size > data_size {
-                                let mut padding_size = m.size - data_size;
-                                let padding_addr = m.address + data_size;
-
-                                if padding_addr < max_user_addr {
-                                    if padding_addr + padding_size > max_user_addr {
-                                        kprintln!(
-                                            "  Clipping padding from {:x} to {:x}",
-                                            padding_addr + padding_size,
-                                            max_user_addr
-                                        );
-                                        padding_size = max_user_addr - padding_addr;
-                                    }
-
-                                    kprintln!(
-                                        "  Mapping padding: addr={:x} size={:x}",
-                                        padding_addr,
-                                        padding_size
-                                    );
-                                    // Use map_zero_range to avoid physical allocations for padding
-                                    crate::mmu::map_zero_range(
-                                        padding_addr,
-                                        padding_size,
-                                        crate::mmu::MapPermission::UserRWX,
-                                    );
-                                }
-                            }
-                            */
-
-                            kprintln!("  Mapped segment {:x} successfully", m.address);
-                        }
+                    // CLIP: Do not map into kernel space (> 1GB)
+                    let max_user_addr = 0x40000000;
+                    if m.address >= max_user_addr {
+                        kprintln!("  Skipping segment outside user range: {:x}", m.address);
+                        continue;
                     }
+                    if m.address + data_size > max_user_addr {
+                        kprintln!(
+                            "  Clipping data part from {:x} to {:x}",
+                            m.address + data_size,
+                            max_user_addr
+                        );
+                        data_size = max_user_addr - m.address;
+                    }
+
+                    // Map the data part (file-backed)
+                    if data_size > 0 {
+                        let alloc_size = (data_size + 4095) & !4095;
+                        let layout =
+                            core::alloc::Layout::from_size_align(alloc_size as usize, 4096)
+                                .unwrap();
+                        let phys_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+                        if phys_ptr.is_null() {
+                            panic!(
+                                "Failed to allocate physical memory for shared region segment (data size={:x})",
+                                data_size
+                            );
+                        }
+                        let paddr = phys_ptr as u64;
+
+                        // Read data from shared cache file into the physical buffer
+                        handle.seek(m.file_offset);
+                        let total_to_read = core::cmp::min(data_size_unaligned, data_size) as usize;
+                        let mut offset = 0;
+                        while offset < total_to_read {
+                            let chunk_size = core::cmp::min(1024 * 1024, total_to_read - offset);
+                            let slice = unsafe {
+                                core::slice::from_raw_parts_mut(
+                                    (phys_ptr as usize + offset) as *mut u8,
+                                    chunk_size,
+                                )
+                            };
+                            handle.read(slice);
+                            offset += chunk_size;
+                        }
+
+                        // Now map the data part to the user's address
+                        crate::mmu::map_range(
+                            m.address,
+                            paddr,
+                            data_size,
+                            crate::mmu::MapPermission::UserRWX,
+                        );
+                    }
+
+                    kprintln!("  Mapped segment {:x} successfully", m.address);
                 }
             }
 

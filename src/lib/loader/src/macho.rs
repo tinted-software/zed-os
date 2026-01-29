@@ -1,6 +1,9 @@
-use crate::cache::SharedCache;
+use crate::LoaderError;
 use core::slice;
 use goblin::mach::MachO;
+
+// Re-export goblin structures that might be useful
+pub use goblin::mach;
 
 pub struct MachOContext<'a> {
     pub macho: MachO<'a>,
@@ -9,12 +12,12 @@ pub struct MachOContext<'a> {
 }
 
 impl<'a> MachOContext<'a> {
-    pub unsafe fn parse(header_ptr: *const u8, slide: usize) -> Option<Self> {
+    pub unsafe fn parse(header_ptr: *const u8, slide: usize) -> Result<Self, LoaderError> {
         // Mach-O headers are reasonably small initially.
-        let data = slice::from_raw_parts(header_ptr, 1024 * 1024);
-        let macho = MachO::parse(data, 0).ok()?;
+        let data = unsafe { slice::from_raw_parts(header_ptr, 1024 * 1024) }; // Safety: Hope it's mapped
+        let macho = MachO::parse(data, 0)?;
 
-        Some(Self {
+        Ok(Self {
             macho,
             base_addr: header_ptr as usize,
             slide,
@@ -35,8 +38,8 @@ impl<'a> MachOContext<'a> {
     pub unsafe fn apply_relocations(
         &mut self,
         libraries: &[MachOContext<'a>],
-        cache: Option<&SharedCache>,
-    ) -> Result<(), &'static str> {
+        lookup_symbol: impl Fn(&str) -> Option<usize>,
+    ) -> Result<(), LoaderError> {
         let slide = self.slide;
         for cmd in &self.macho.load_commands {
             if let goblin::mach::load_command::CommandVariant::DyldInfoOnly(dyld_info) =
@@ -58,7 +61,7 @@ impl<'a> MachOContext<'a> {
                             dyld_info.bind_size as usize,
                         )
                     };
-                    (unsafe { self.perform_bind(bind_data, slide, libraries, cache) })?;
+                    (unsafe { self.perform_bind(bind_data, slide, libraries, &lookup_symbol) })?;
                 }
             }
         }
@@ -70,8 +73,8 @@ impl<'a> MachOContext<'a> {
         data: &[u8],
         slide: usize,
         libraries: &[MachOContext<'a>],
-        _cache: Option<&SharedCache>,
-    ) -> Result<(), &'static str> {
+        lookup_symbol: &impl Fn(&str) -> Option<usize>,
+    ) -> Result<(), LoaderError> {
         let mut cursor = 0;
         let mut seg_offset = 0;
         let mut segment_address = 0;
@@ -118,6 +121,7 @@ impl<'a> MachOContext<'a> {
                             symbol_name,
                             library_ordinal,
                             libraries,
+                            lookup_symbol,
                         )
                     };
                     seg_offset += 8;
@@ -129,6 +133,7 @@ impl<'a> MachOContext<'a> {
                             symbol_name,
                             library_ordinal,
                             libraries,
+                            lookup_symbol,
                         )
                     };
                     seg_offset += decode_uleb128(data, &mut cursor) + 8;
@@ -140,6 +145,7 @@ impl<'a> MachOContext<'a> {
                             symbol_name,
                             library_ordinal,
                             libraries,
+                            lookup_symbol,
                         )
                     };
                     seg_offset += immediate as usize * 8 + 8;
@@ -154,12 +160,13 @@ impl<'a> MachOContext<'a> {
                                 symbol_name,
                                 library_ordinal,
                                 libraries,
+                                lookup_symbol,
                             )
                         };
                         seg_offset += skip + 8;
                     }
                 }
-                _ => return Err("Unknown bind opcode"),
+                _ => return Err(LoaderError::RelocationError("Unknown bind opcode")),
             }
         }
         Ok(())
@@ -171,8 +178,16 @@ impl<'a> MachOContext<'a> {
         name: &str,
         _ordinal: usize,
         libraries: &[MachOContext<'a>],
+        lookup_symbol: &impl Fn(&str) -> Option<usize>,
     ) {
-        // Simple search: look in all loaded libraries
+        // First try the provided lookup function (e.g. shared cache)
+        if let Some(sym_addr) = lookup_symbol(name) {
+            let ptr = addr as *mut usize;
+            unsafe { *ptr = sym_addr };
+            return;
+        }
+
+        // Then look in all loaded libraries
         for lib in libraries {
             if let Some(sym_addr) = lib.find_symbol(name) {
                 let ptr = addr as *mut usize;
@@ -182,7 +197,7 @@ impl<'a> MachOContext<'a> {
         }
     }
 
-    unsafe fn perform_rebase(&self, data: &[u8], slide: usize) -> Result<(), &'static str> {
+    unsafe fn perform_rebase(&self, data: &[u8], slide: usize) -> Result<(), LoaderError> {
         let mut cursor = 0;
         let mut seg_offset = 0;
         let mut segment_address = 0;
@@ -237,15 +252,17 @@ impl<'a> MachOContext<'a> {
                         seg_offset += skip + 8;
                     }
                 }
-                _ => return Err("Unknown rebase opcode"),
+                _ => return Err(LoaderError::RelocationError("Unknown rebase opcode")),
             }
         }
         Ok(())
     }
 
     unsafe fn rebase_at(&self, addr: usize, slide: usize) {
-        let ptr = addr as *mut usize;
-        *ptr += slide;
+        unsafe {
+            let ptr = addr as *mut usize;
+            *ptr += slide;
+        }
     }
 }
 

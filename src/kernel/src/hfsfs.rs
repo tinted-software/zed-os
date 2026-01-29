@@ -90,15 +90,12 @@ impl<R: Read + Seek> Read for BufReader<R> {
 
 impl<R: Read + Seek> Seek for BufReader<R> {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        match pos {
-            SeekFrom::Current(n) => {
-                let new_pos = self.pos as i64 + n;
-                if new_pos >= 0 && new_pos <= self.cap as i64 {
-                    self.pos = new_pos as usize;
-                    return self.inner.seek(SeekFrom::Current(0));
-                }
+        if let SeekFrom::Current(n) = pos {
+            let new_pos = self.pos as i64 + n;
+            if new_pos >= 0 && new_pos <= self.cap as i64 {
+                self.pos = new_pos as usize;
+                return self.inner.seek(SeekFrom::Current(0));
             }
-            _ => {}
         }
         self.pos = 0;
         self.cap = 0;

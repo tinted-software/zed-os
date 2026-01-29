@@ -5,6 +5,7 @@ members = [
     "src/tools/gravity-setup",
     "src/tools/linker-wrapper",
     "src/lib/dyld",
+    "src/lib/loader",
     "src/lib/vfdecrypt",
     "src/lib/ipsw-downloader",
     "src/lib/hfsplus",
@@ -77,7 +78,7 @@ zlib-rs = { version = "0.6.0", default-features = false, features = [
 rand_core = { version = "0.9.5", default-features = false }
 rand_chacha = { version = "0.9.0", default-features = false }
 lzma-rust2 = { version = "=0.15.7", default-features = false }
-zstd = { version = "0.13", default-features = false }
+zstd-safe = { version = "7.2.4", default-features = false }
 
 [profile.dev]
 panic = "abort"
