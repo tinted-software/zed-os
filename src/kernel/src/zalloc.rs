@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
+use alloc::vec;
 use alloc::vec::Vec;
-use core::alloc::Layout;
 
 /// A simple compressed memory allocator (zram-like).
 /// It takes input data (e.g. a page), compresses it using Zstd,
@@ -21,23 +21,54 @@ pub struct ZAllocator {
 /// Compress data using Zstd.
 /// Returns a Vec<u8> containing the compressed data.
 pub fn zcompress(data: &[u8]) -> Result<Vec<u8>, &'static str> {
-    // zstd::encode_all is a convenient helper if available.
-    // With default-features=false, we might only have low-level APIs.
-    // Using level 1 for speed.
-    match zstd::stream::encode_all(data, 1) {
-        Ok(compressed) => Ok(compressed),
+    // zstd-safe is a safe wrapper around zstd-sys.
+    // It does not have stream::encode_all. We must use simple API.
+
+    // Estimate bounds
+    let bound = zstd_safe::compress_bound(data.len());
+    let mut buffer = vec![0u8; bound];
+
+    // Level 1 for speed
+    match zstd_safe::compress(&mut buffer[..], data, 1) {
+        Ok(len) => {
+            buffer.truncate(len);
+            Ok(buffer)
+        }
         Err(_) => Err("Compression failed"),
     }
 }
 
 /// Decompress data using Zstd.
+/// We don't know the exact uncompressed size usually, unless stored.
+/// But for pages, we usually know (e.g. 4096 or 16384).
+/// For generic use, we might need a loop or header.
+/// However, zstd frames include content size if not disabled.
 pub fn zdecompress(data: &[u8]) -> Result<Vec<u8>, &'static str> {
-    match zstd::stream::decode_all(data) {
-        Ok(decompressed) => Ok(decompressed),
+    // Try to find content size
+    let content_size = zstd_safe::get_frame_content_size(data).unwrap_or(None);
+
+    let mut capacity = if let Some(size) = content_size {
+        size as usize
+    } else {
+        // Fallback: Guess 4x compression or just 4096 for pages
+        4096 * 4
+    };
+
+    // Safety check for OOM vectors
+    if capacity > 16 * 1024 * 1024 {
+        capacity = 16 * 1024 * 1024;
+    }
+
+    let mut buffer = vec![0u8; capacity];
+
+    match zstd_safe::decompress(&mut buffer[..], data) {
+        Ok(len) => {
+            buffer.truncate(len);
+            Ok(buffer)
+        }
         Err(_) => Err("Decompression failed"),
     }
 }
-
 /// A "ZRAM" block device simulator.
 /// Stores pages in a compressed format in memory.
 pub struct ZRamDevice {
@@ -72,12 +103,12 @@ impl ZRamDevice {
         }
 
         if let Some(ref compressed) = self.blocks[index] {
-            match zstd::stream::decode_all(&compressed[..]) {
-                Ok(decompressed) => {
-                    if decompressed.len() != self.block_size {
+            // We know the expected output size is self.block_size
+            match zstd_safe::decompress(out, compressed) {
+                Ok(len) => {
+                    if len != self.block_size {
                         return Err("Decompressed size mismatch");
                     }
-                    out.copy_from_slice(&decompressed);
                     Ok(())
                 }
                 Err(_) => Err("Decompression failed"),

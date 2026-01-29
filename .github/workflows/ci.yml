@@ -6,28 +6,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
+      - uses: dtolnay/rust-toolchain@master
         with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Build Kernel
-        run: nix build .#kernel
-
-      - name: Build Host Tools
-        run: |
-          nix build .#gravity-setup
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Run Tests
-        run: nix flake check
+          toolchain: nightly
+          components: rustfmt, clippy, rust-src
+          targets: aarch64-unknown-none-softfloat
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --exclude kernel --exclude dyld
+      - run: cargo clippy --workspace --target aarch64-unknown-none-softfloat -p kernel -p dyld

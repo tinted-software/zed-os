@@ -44,24 +44,26 @@ impl SharedCache {
     }
 
     pub unsafe fn find_dylib(&self, path: &str) -> Option<*const u8> {
-        let header = &*(self.base_addr as *const DyldCacheHeader);
-        let images = slice::from_raw_parts(
-            self.base_addr.add(header.images_offset as usize) as *const DyldCacheImageInfo,
-            header.images_count as usize,
-        );
+        unsafe {
+            let header = &*(self.base_addr as *const DyldCacheHeader);
+            let images = slice::from_raw_parts(
+                self.base_addr.add(header.images_offset as usize) as *const DyldCacheImageInfo,
+                header.images_count as usize,
+            );
 
-        for image in images {
-            let image_path_ptr = self.base_addr.add(image.path_offset as usize) as *const u8;
-            let mut len = 0;
-            while *image_path_ptr.add(len) != 0 {
-                len += 1;
+            for image in images {
+                let image_path_ptr = self.base_addr.add(image.path_offset as usize) as *const u8;
+                let mut len = 0;
+                while *image_path_ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let image_path =
+                    core::str::from_utf8(slice::from_raw_parts(image_path_ptr, len)).ok()?;
+                if image_path == path {
+                    return Some(image.address as *const u8);
+                }
             }
-            let image_path =
-                core::str::from_utf8(slice::from_raw_parts(image_path_ptr, len)).ok()?;
-            if image_path == path {
-                return Some(image.address as *const u8);
-            }
+            None
         }
-        None
     }
 }

@@ -177,23 +177,21 @@ fn handle_host_rpc(header: &MachMsgHeader, _msg: *mut MachMsgHeader, space: &mut
                     // host_info
                     (*r_hdr).msgh_size = 100; // Larger buffer
                     let data_ptr = reply.as_mut_ptr().add(24) as *mut i32;
-                    unsafe {
-                        core::ptr::write_bytes(data_ptr, 0, 76);
+                    core::ptr::write_bytes(data_ptr, 0, 76);
 
-                        if flavor == 1 {
-                            // HOST_BASIC_INFO
-                            *data_ptr = 1; // max_cpus
-                            *data_ptr.add(1) = 1; // avail_cpus
-                            *data_ptr.add(2) = 1024 * 1024 * 1024; // memory_size
-                            *data_ptr.add(3) = 12; // cpu_type: ARM
-                            *data_ptr.add(4) = 9; // cpu_subtype: V7
-                            *data_ptr.add(5) = 1; // cpu_threadtype
-                            *data_ptr.add(6) = 1; // physical_cpu
-                            *data_ptr.add(7) = 1; // physical_cpu_max
-                            *data_ptr.add(8) = 1; // logical_cpu
-                            *data_ptr.add(9) = 1; // logical_cpu_max
-                            *(data_ptr.add(10) as *mut u64) = 1024 * 1024 * 1024; // max_mem
-                        }
+                    if flavor == 1 {
+                        // HOST_BASIC_INFO
+                        *data_ptr = 1; // max_cpus
+                        *data_ptr.add(1) = 1; // avail_cpus
+                        *data_ptr.add(2) = 1024 * 1024 * 1024; // memory_size
+                        *data_ptr.add(3) = 12; // cpu_type: ARM
+                        *data_ptr.add(4) = 9; // cpu_subtype: V7
+                        *data_ptr.add(5) = 1; // cpu_threadtype
+                        *data_ptr.add(6) = 1; // physical_cpu
+                        *data_ptr.add(7) = 1; // physical_cpu_max
+                        *data_ptr.add(8) = 1; // logical_cpu
+                        *data_ptr.add(9) = 1; // logical_cpu_max
+                        *(data_ptr.add(10) as *mut u64) = 1024 * 1024 * 1024; // max_mem
                     }
                 }
                 3402 => {
