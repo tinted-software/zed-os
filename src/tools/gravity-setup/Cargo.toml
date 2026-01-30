@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-apple-dmg = { path = "../../lib/apple-dmg" }
+apple-dmg = { path = "../../lib/apple-dmg", features = ["std"] }
 hfsplus = { path = "../../lib/hfsplus" }
 vfdecrypt = { path = "../../lib/vfdecrypt" }
 ipsw-downloader = { path = "../../lib/ipsw-downloader" }

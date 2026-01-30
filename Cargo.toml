@@ -9,7 +9,9 @@ members = [
     "src/lib/vfdecrypt",
     "src/lib/ipsw-downloader",
     "src/lib/hfsplus",
-    "src/lib/apple-dmg", "src/tools/emulator", "src/tools/devicetree",
+    "src/lib/apple-dmg",
+    "src/tools/emulator",
+    "src/tools/devicetree",
 ]
 resolver = "3"
 
@@ -34,12 +36,13 @@ goblin = { version = "0.10.4", default-features = false, features = [
 ] }
 linked_list_allocator = "0.10.5"
 spin = "0.10.0"
-plist = "1.8.0"
+plist = { version = "1.8.0", default-features = false, features = ["serde"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false }
-clap = { version = "4.5.55", features = [
+clap = { version = "4.5.56", features = [
     "derive",
     "std",
+    "help",
 ], default-features = false }
 aes = "0.8.4"
 hmac = "0.12.1"
@@ -80,7 +83,7 @@ zlib-rs = { version = "0.6.0", default-features = false, features = [
 rand_core = { version = "0.9.5", default-features = false }
 rand_chacha = { version = "0.9.0", default-features = false }
 lzma-rust2 = { version = "=0.15.7", default-features = false }
-zstd-safe = { version = "7.2.4", default-features = false }
+ruzstd = { version = "0.8.2", default-features = false }
 
 [profile.dev]
 panic = "abort"

@@ -1,15 +1,9 @@
-use apple_dmg::{ChunkType, DmgReader};
 use clap::Parser;
-use flate2::bufread::ZlibDecoder;
-use hfsplus::HFSVolume;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use ipsw_downloader::fetch_firmware_url;
-use memmap2::MmapMut;
-use rayon::prelude::*;
 use std::cmp::min;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
@@ -35,7 +29,21 @@ pub enum SetupError {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "gravity-setup", ignore_errors = true)]
+#[command(name = "gravity-setup")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Setup the OS (fetch IPSW, decrypt, build kernel)
+    Setup(Args),
+    /// Run the kernel in QEMU
+    Qemu(QemuArgs),
+}
+
+#[derive(Parser, Debug)]
 struct Args {
     /// Device Identifier (e.g., iPad1,1)
     #[arg(long, default_value = "iPad1,1")]
@@ -69,16 +77,45 @@ struct Args {
     ci: bool,
 }
 
+#[derive(Parser, Debug)]
+struct QemuArgs {
+    /// Path to the kernel binary
+    #[arg(
+        long,
+        default_value = "target/aarch64-unknown-none-softfloat/debug/kernel"
+    )]
+    kernel: PathBuf,
+
+    /// Memory size
+    #[arg(long, default_value = "1G")]
+    memory: String,
+
+    /// Number of CPUs
+    #[arg(long, default_value_t = 1)]
+    cpus: u32,
+
+    /// Whether to run in nographic mode
+    #[arg(long, default_value_t = true)]
+    nographic: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), SetupError> {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Setup(args) => setup(args).await,
+        Commands::Qemu(args) => qemu(args),
+    }
+}
+
+async fn setup(args: Args) -> Result<(), SetupError> {
     let mp = MultiProgress::new();
     let total_start = Instant::now();
 
     std::fs::create_dir_all(&args.work_dir)?;
 
     // cargo build kernel
-    std::process::Command::new("cargo")
+    if !std::process::Command::new("cargo")
         .arg("build")
         .arg("-Zbuild-std=core,alloc,compiler_builtins")
         .arg("-Zbuild-std-features=compiler-builtins-mem")
@@ -90,10 +127,16 @@ async fn main() -> Result<(), SetupError> {
         .arg("dyld")
         .env(
             "RUSTFLAGS",
-            "-Zsanitizer=kcfi -Clink-arg=--ld-path=wild -Clinker=clang",
+            "-Zsanitizer=kcfi -Clink-arg=--ld-path=ld.lld -Clinker=clang -Clink-arg=--target=aarch64-unknown-none-elf -Clink-arg=-nostdlib",
         )
         .status()
-        .map_err(|e| SetupError::Other(e.to_string()))?;
+        .map_err(|e| SetupError::Other(e.to_string()))?
+        .success()
+    {
+        return Err(SetupError::Other(
+            "Failed to build kernel or dyld".to_string(),
+        ));
+    }
 
     if !args.ci {
         println!(
@@ -187,6 +230,39 @@ async fn main() -> Result<(), SetupError> {
     }
 
     println!("✨ Done in {:?}", total_start.elapsed());
+    Ok(())
+}
+
+fn qemu(args: QemuArgs) -> Result<(), SetupError> {
+    println!("🚀 Starting QEMU...");
+    let mut cmd = std::process::Command::new("qemu-system-aarch64");
+    cmd.arg("-machine")
+        .arg("virt")
+        .arg("-cpu")
+        .arg("cortex-a57")
+        .arg("-m")
+        .arg(&args.memory)
+        .arg("-smp")
+        .arg(args.cpus.to_string())
+        .arg("-kernel")
+        .arg(&args.kernel)
+        .arg("-drive")
+        .arg("file=work/rootfs.dmg,format=raw,if=virtio")
+        .arg("-serial")
+        .arg("mon:stdio");
+
+    if args.nographic {
+        cmd.arg("-nographic");
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| SetupError::Other(format!("Failed to run QEMU: {}", e)))?;
+
+    if !status.success() {
+        return Err(SetupError::Other("QEMU exited with error".to_string()));
+    }
+
     Ok(())
 }
 

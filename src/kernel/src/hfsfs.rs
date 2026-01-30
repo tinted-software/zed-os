@@ -1,110 +1,12 @@
-//! HFS+ filesystem reader
-
-use crate::block::BlockReader;
+use crate::block::{BlockReader, BufReader, DeviceWrapper, ReadSeek};
 use crate::kprintln;
 use alloc::boxed::Box;
-use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use hfsplus::{CatalogBody, Error, Fork, HFSVolume, Read, Result, Seek, SeekFrom};
+use hfsplus::{CatalogBody, Fork, HFSVolume, Read, Seek, SeekFrom};
 use spin::Mutex;
 
-pub struct DeviceWrapper {
-    device: Arc<dyn BlockReader>,
-    base_offset: u64,
-    pos: u64,
-}
-
-impl DeviceWrapper {
-    pub fn new(device: Arc<dyn BlockReader>, base_offset: u64) -> Self {
-        Self {
-            device,
-            base_offset,
-            pos: 0,
-        }
-    }
-}
-
-impl Read for DeviceWrapper {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        // kprintln!("DeviceWrapper: read {} bytes at {}", buf.len(), self.pos);
-        if self.device.read_at(self.base_offset + self.pos, buf) {
-            self.pos += buf.len() as u64;
-            Ok(buf.len())
-        } else {
-            // kprintln!("DeviceWrapper: READ FAILED at {}", self.pos);
-            Err(Error::InvalidData(String::from("Read failed")))
-        }
-    }
-}
-
-impl Seek for DeviceWrapper {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        match pos {
-            SeekFrom::Start(s) => self.pos = s,
-            SeekFrom::Current(c) => self.pos = (self.pos as i64 + c) as u64,
-            SeekFrom::End(_) => return Err(Error::UnsupportedOperation),
-        }
-        // kprintln!("DeviceWrapper: seek to {}", self.pos);
-        Ok(self.pos)
-    }
-}
-
-pub struct BufReader<R: Read + Seek> {
-    inner: R,
-    buffer: Vec<u8>,
-    pos: usize,
-    cap: usize,
-}
-
-impl<R: Read + Seek> BufReader<R> {
-    pub fn with_capacity(cap: usize, inner: R) -> Self {
-        Self {
-            inner,
-            buffer: vec![0; cap],
-            pos: 0,
-            cap: 0,
-        }
-    }
-}
-
-impl<R: Read + Seek> Read for BufReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if self.pos >= self.cap {
-            if buf.len() >= self.buffer.len() {
-                return self.inner.read(buf);
-            }
-            self.pos = 0;
-            self.cap = self.inner.read(&mut self.buffer)?;
-            if self.cap == 0 {
-                return Ok(0);
-            }
-        }
-        let n = core::cmp::min(buf.len(), self.cap - self.pos);
-        buf[..n].copy_from_slice(&self.buffer[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
-}
-
-impl<R: Read + Seek> Seek for BufReader<R> {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        if let SeekFrom::Current(n) = pos {
-            let new_pos = self.pos as i64 + n;
-            if new_pos >= 0 && new_pos <= self.cap as i64 {
-                self.pos = new_pos as usize;
-                return self.inner.seek(SeekFrom::Current(0));
-            }
-        }
-        self.pos = 0;
-        self.cap = 0;
-        self.inner.seek(pos)
-    }
-}
-
 pub struct HfsFs {
-    volume: Arc<Mutex<HFSVolume<BufReader<DeviceWrapper>>>>,
+    volume: Arc<Mutex<HFSVolume<Box<dyn ReadSeek>>>>,
 }
 
 impl HfsFs {
@@ -112,14 +14,18 @@ impl HfsFs {
         kprintln!("HfsFs: Initializing with offset {:x}", base_offset);
         let wrapper = DeviceWrapper::new(device, base_offset);
         let buffered = BufReader::with_capacity(64 * 1024, wrapper);
+        Self::new_from_reader(Box::new(buffered))
+    }
+
+    pub fn new_from_reader(reader: Box<dyn ReadSeek>) -> Self {
         kprintln!("HfsFs: Loading HFS+ volume...");
 
         // Manual HFSVolume::load but with kernel logs
-        let mut file = buffered;
+        let mut file = reader;
         file.seek(hfsplus::SeekFrom::Start(1024)).unwrap();
         let header = hfsplus::HFSPlusVolumeHeader::import(&mut file).unwrap();
 
-        let file_arc = Arc::new(Mutex::new(file));
+        let file_arc: Arc<Mutex<Box<dyn ReadSeek>>> = Arc::new(Mutex::new(file));
         let volume = Arc::new(Mutex::new(hfsplus::HFSVolume {
             file: Arc::clone(&file_arc),
             header,
@@ -185,8 +91,7 @@ impl HfsFs {
             let mut fork_type = 0;
             if fork_data.logical_size == 0 && file_info.resource_fork.logical_size > 0 {
                 fork_data = &file_info.resource_fork;
-                fork_type = 0xFF; // Usually resource fork is different type in extents btree, but Fork::load handles it?
-                // Actually, Fork::load takes fork_type. Catalog data fork is 0, resource is 0xFF.
+                fork_type = 0xFF;
             }
 
             let fork = Fork::load(
@@ -207,8 +112,14 @@ impl HfsFs {
     }
 }
 
+impl crate::vfs::FileSystem for HfsFs {
+    fn open(&self, path: &str) -> Option<Box<dyn crate::vfs::File>> {
+        self.open(path)
+    }
+}
+
 pub struct HfsFileHandle {
-    fork: Mutex<Fork<BufReader<DeviceWrapper>>>,
+    fork: Mutex<Fork<Box<dyn ReadSeek>>>,
 }
 
 impl crate::vfs::File for HfsFileHandle {

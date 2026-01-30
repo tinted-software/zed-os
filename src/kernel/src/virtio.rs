@@ -51,6 +51,7 @@ const PCI_CAP_PTR: usize = 0x34;
 // Virtio PCI capability types
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
+const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 // Virtio PCI common configuration offsets
 const VIRTIO_PCI_COMMON_GFSELECT: usize = 0x08;
@@ -127,6 +128,7 @@ pub struct VirtioBlk {
     req_buf: *mut VirtioBlkReq,
     status_buf: *mut u8,
     next_desc_idx: u16,
+    capacity: u64,
 }
 
 unsafe impl Send for VirtioBlk {}
@@ -165,6 +167,8 @@ struct VirtioCaps {
     notify_bar: u8,
     notify_offset: u32,
     notify_off_mult: u32,
+    device_cfg_bar: u8,
+    device_cfg_offset: u32,
 }
 
 fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
@@ -181,6 +185,8 @@ fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
         notify_bar: 0,
         notify_offset: 0,
         notify_off_mult: 0,
+        device_cfg_bar: 0,
+        device_cfg_offset: 0,
     };
 
     while cap_ptr != 0 {
@@ -198,6 +204,10 @@ fn find_virtio_caps(bus: u8, dev: u8, func: u8) -> Option<VirtioCaps> {
                     caps.notify_bar = bar;
                     caps.notify_offset = offset;
                     caps.notify_off_mult = pci_read32(bus, dev, func, cap_ptr + 16);
+                }
+                VIRTIO_PCI_CAP_DEVICE_CFG => {
+                    caps.device_cfg_bar = bar;
+                    caps.device_cfg_offset = offset;
                 }
                 _ => {}
             }
@@ -276,6 +286,7 @@ impl VirtioBlk {
         kprintln!("Virtio: BAR at {:x}", bar);
         let common_cfg = bar as usize + caps.common_cfg_offset as usize;
         let notify_cap_base = bar as usize + caps.notify_offset as usize;
+        let device_cfg = bar as usize + caps.device_cfg_offset as usize;
 
         unsafe {
             write_volatile((common_cfg + VIRTIO_PCI_COMMON_STATUS) as *mut u8, 0);
@@ -348,6 +359,13 @@ impl VirtioBlk {
 
             kprintln!("Virtio: Blk device ready");
 
+            let capacity = read_volatile(device_cfg as *const u64);
+            kprintln!(
+                "Virtio: Capacity {} sectors ({} MB)",
+                capacity,
+                (capacity * 512) / (1024 * 1024)
+            );
+
             Some(Self {
                 notify_addr,
                 desc,
@@ -357,6 +375,7 @@ impl VirtioBlk {
                 req_buf,
                 status_buf,
                 next_desc_idx: 0,
+                capacity,
             })
         }
     }
@@ -438,13 +457,12 @@ impl BlockReader for Mutex<VirtioBlk> {
         }
         let end_sector = (offset + buf.len() as u64).div_ceil(512);
         let mut temp = vec![0u8; ((end_sector - start_sector) * 512) as usize];
-        if blk.read_sectors(start_sector, &mut temp) {
-            let off = (offset % 512) as usize;
-            buf.copy_from_slice(&temp[off..off + buf.len()]);
-            true
-        } else {
-            false
-        }
+
+        true
+    }
+
+    fn size(&self) -> u64 {
+        self.lock().capacity * 512
     }
 }
 

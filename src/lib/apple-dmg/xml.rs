@@ -3,11 +3,17 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+extern crate alloc;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use {
     crate::blkx::BlkxTable,
-    anyhow::Result,
     serde::{Deserialize, Serialize},
 };
+
+use crate::Result;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Plist {
@@ -51,7 +57,8 @@ pub struct Partition {
 impl Partition {
     pub fn new(id: i32, name: String, table: BlkxTable) -> Self {
         let mut data = vec![];
-        table.write_to(&mut data).unwrap();
+        let mut cursor = binrw::io::Cursor::new(&mut data);
+        table.write_to(&mut cursor).unwrap();
         Self {
             attributes: "0x0050".to_string(),
             cfname: name.clone(),
@@ -62,6 +69,7 @@ impl Partition {
     }
 
     pub fn table(&self) -> Result<BlkxTable> {
-        BlkxTable::read_from(&mut &self.data[..])
+        let mut cursor = binrw::io::Cursor::new(&self.data[..]);
+        BlkxTable::read_from(&mut cursor)
     }
 }

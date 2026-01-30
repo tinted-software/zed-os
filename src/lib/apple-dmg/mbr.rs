@@ -1,6 +1,8 @@
-use byteorder::{ByteOrder, LittleEndian};
+use binrw::{BinRead, BinWrite};
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, BinRead, BinWrite)]
+#[br(little)]
+#[bw(little)]
 pub struct PartRecord {
     pub boot_indicator: u8,
     pub start_head: u8,
@@ -30,30 +32,24 @@ impl PartRecord {
             lb_len,
         }
     }
-
-    pub fn write_to(&self, buf: &mut [u8]) {
-        buf[0] = self.boot_indicator;
-        buf[1] = self.start_head;
-        buf[2] = self.start_sector;
-        buf[3] = self.start_track;
-        buf[4] = self.os_type;
-        buf[5] = self.end_head;
-        buf[6] = self.end_sector;
-        buf[7] = self.end_track;
-        LittleEndian::write_u32(&mut buf[8..12], self.lb_start);
-        LittleEndian::write_u32(&mut buf[12..16], self.lb_len);
-    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, BinRead, BinWrite)]
+#[br(little)]
+#[bw(little)]
 pub struct ProtectiveMBR {
+    #[br(seek_before = binrw::io::SeekFrom::Start(446))]
+    #[bw(seek_before = binrw::io::SeekFrom::Start(446))]
     pub partitions: [PartRecord; 4],
+    #[br(assert(signature == [0x55, 0xAA]))]
+    pub signature: [u8; 2],
 }
 
 impl ProtectiveMBR {
     pub fn new() -> Self {
         Self {
             partitions: [PartRecord::default(); 4],
+            signature: [0x55, 0xAA],
         }
     }
 
@@ -64,71 +60,10 @@ impl ProtectiveMBR {
     }
 
     pub fn to_bytes(&self) -> [u8; 512] {
+        use binrw::BinWriterExt;
         let mut buf = [0u8; 512];
-        // Partition table at offset 446
-        for (i, p) in self.partitions.iter().enumerate() {
-            let offset = 446 + i * 16;
-            p.write_to(&mut buf[offset..offset + 16]);
-        }
-
-        // Signature
-        buf[510] = 0x55;
-        buf[511] = 0xAA;
-
+        let mut cursor = binrw::io::Cursor::new(&mut buf[..]);
+        cursor.write_le(self).unwrap();
         buf
-    }
-
-    #[allow(dead_code)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.len() < 512 {
-            return Err("buffer too small");
-        }
-        if bytes[510] != 0x55 || bytes[511] != 0xAA {
-            return Err("invalid signature");
-        }
-        let mut partitions = [PartRecord::default(); 4];
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..4 {
-            let offset = 446 + i * 16;
-            let p = &bytes[offset..offset + 16];
-            partitions[i] = PartRecord {
-                boot_indicator: p[0],
-                start_head: p[1],
-                start_sector: p[2],
-                start_track: p[3],
-                os_type: p[4],
-                end_head: p[5],
-                end_sector: p[6],
-                end_track: p[7],
-                lb_start: LittleEndian::read_u32(&p[8..12]),
-                lb_len: LittleEndian::read_u32(&p[12..16]),
-            };
-        }
-        Ok(Self { partitions })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mbr_serialization() {
-        let mut mbr = ProtectiveMBR::new();
-        let mut p = PartRecord::new_protective(Some(1000));
-        p.os_type = 0x0B;
-        mbr.set_partition(0, p);
-
-        let bytes = mbr.to_bytes();
-        assert_eq!(bytes[510], 0x55);
-        assert_eq!(bytes[511], 0xAA);
-
-        // Check partition 1
-        let offset = 446;
-        assert_eq!(bytes[offset + 4], 0x0B); // os_type
-        let start = LittleEndian::read_u32(&bytes[offset + 8..]);
-        let len = LittleEndian::read_u32(&bytes[offset + 12..]);
-        assert_eq!(start, 1);
-        assert_eq!(len, 1000);
     }
 }

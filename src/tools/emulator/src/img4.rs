@@ -1,5 +1,5 @@
 use rasn::types::{OctetString, Utf8String};
-use rasn::{AsnType, Decode, Encode};
+use rasn::{AsnType, Decode, Decoder, Encode};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
