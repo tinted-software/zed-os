@@ -2,7 +2,7 @@
 members = [
     "src/kernel",
     "src/tools/ipsw",
-    "src/tools/gravity-setup",
+    "src/tools/setup",
     "src/tools/linker-wrapper",
     "src/lib/dyld",
     "src/lib/loader",

@@ -1,100 +1,110 @@
-use std::collections::HashMap;
+use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct Uart;
+
+impl Uart {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn read(&self, offset: u32) -> u32 {
+        match offset {
+            0x10 => 0x6, // UTRSTAT - TX empty | RX empty(0) | TX buf empty
+            0x14 => 0x0, // UERSTAT
+            0x18 => 0x0, // UFSTAT - RX FIFO count 0, TX FIFO count 0
+            _ => 0,
+        }
+    }
+
+    pub fn write(&mut self, offset: u32, value: u32) {
+        match offset {
+            0x20 => {
+                // UTXH - Transmit char
+                let c = value as u8;
+                print!("{}", c as char);
+                let _ = io::stdout().flush();
+            }
+            _ => {}
+        }
+    }
+}
+
+pub struct Timer {
+    pub control: u32,
+}
+
+impl Timer {
+    pub fn new() -> Self {
+        Self { control: 0 }
+    }
+
+    pub fn read(&self, offset: u32) -> u32 {
+        match offset {
+            0x00 => self.control, // TCON
+            0x04 => {
+                // TCNT - Return generic time-based counter
+                let start = SystemTime::now();
+                let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+                (since_epoch.as_micros() & 0xFFFFFFFF) as u32
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn write(&mut self, offset: u32, value: u32) {
+        match offset {
+            0x00 => self.control = value,
+            _ => {}
+        }
+    }
+}
 
 pub struct Hardware {
-    pub timers: HashMap<u32, u32>,
-    pub gpio: HashMap<u32, u32>,
-    pub clock_gates: HashMap<u32, u32>,
-    pub power_mgmt: HashMap<u32, u32>,
+    pub uart0: Uart,
+    pub timer: Timer,
 }
 
 impl Hardware {
     pub fn new() -> Self {
-        let mut hw = Self {
-            timers: HashMap::new(),
-            gpio: HashMap::new(),
-            clock_gates: HashMap::new(),
-            power_mgmt: HashMap::new(),
-        };
-
-        // Initialize default values for iPad 1,1 Apple A4
-        hw.init_defaults();
-        hw
-    }
-
-    fn init_defaults(&mut self) {
-        // Clock gates - all enabled
-        self.clock_gates.insert(0x3C500010, 0xFFFFFFFF);
-        self.clock_gates.insert(0x3C500020, 0xFFFFFFFF);
-
-        // Power management - all powered on
-        self.power_mgmt.insert(0x3C500000, 0x1);
-
-        // Timers - running
-        self.timers.insert(0x3C700000, 0x1000); // Timer counter
-
-        // GPIO - default states
-        self.gpio.insert(0x3CF00000, 0x0);
+        Self {
+            uart0: Uart::new(),
+            timer: Timer::new(),
+        }
     }
 
     pub fn read(&self, addr: u32) -> Option<u32> {
-        match addr {
-            // Clock and Power Management Unit (CPMU)
-            0x3C500000..=0x3C5000FF => self.power_mgmt.get(&addr).copied(),
-            0x3C500010..=0x3C50002F => self.clock_gates.get(&addr).copied(),
-
-            // Timer
-            0x3C700000..=0x3C7000FF => {
-                if addr == 0x3C700000 {
-                    // Return incrementing timer value
-                    Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u32,
-                    )
-                } else {
-                    self.timers.get(&addr).copied()
-                }
-            }
-
-            // GPIO
-            0x3CF00000..=0x3CF000FF => self.gpio.get(&addr).copied(),
-
-            // System Controller
-            0x3D000000..=0x3D0000FF => Some(0x1), // Always ready
-
-            _ => None,
+        // UART0
+        if addr >= 0x82500000 && addr <= 0x82500040 {
+            return Some(self.uart0.read(addr - 0x82500000));
         }
+
+        // Also check 0x80020000 (Device Tree/Alternate UART)
+        if addr >= 0x80020000 && addr <= 0x80020040 {
+            return Some(self.uart0.read(addr - 0x80020000));
+        }
+
+        // Timer
+        if addr >= 0x3C700000 && addr <= 0x3C700040 {
+            return Some(self.timer.read(addr - 0x3C700000));
+        }
+
+        None
     }
 
     pub fn write(&mut self, addr: u32, value: u32) -> bool {
-        match addr {
-            // Clock and Power Management
-            0x3C500000..=0x3C5000FF => {
-                self.power_mgmt.insert(addr, value);
-                true
-            }
-            0x3C500010..=0x3C50002F => {
-                self.clock_gates.insert(addr, value);
-                true
-            }
-
-            // Timer
-            0x3C700000..=0x3C7000FF => {
-                self.timers.insert(addr, value);
-                true
-            }
-
-            // GPIO
-            0x3CF00000..=0x3CF000FF => {
-                self.gpio.insert(addr, value);
-                true
-            }
-
-            // System Controller
-            0x3D000000..=0x3D0000FF => true, // Accept writes
-
-            _ => false,
+        // UART0
+        if addr >= 0x82500000 && addr <= 0x82500040 {
+            self.uart0.write(addr - 0x82500000, value);
+            return true;
         }
+
+        // Timer
+        if addr >= 0x3C700000 && addr <= 0x3C700040 {
+            self.timer.write(addr - 0x3C700000, value);
+            return true;
+        }
+
+        false
     }
 }

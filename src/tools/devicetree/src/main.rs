@@ -132,106 +132,6 @@ struct DeviceTreeProperty {
     value: Vec<u8>,
 }
 
-fn parse_device_tree(data: &[u8]) -> Result<()> {
-    println!("Analyzing device tree structure...");
-
-    // Search for UART nodes and extract register information
-    let mut uart_nodes = Vec::new();
-
-    // Look for UART node patterns
-    for (i, window) in data.windows(5).enumerate() {
-        if let Ok(s) = std::str::from_utf8(window) {
-            if s.starts_with("uart")
-                && (s
-                    .chars()
-                    .nth(4)
-                    .map_or(false, |c| c.is_ascii_digit() || c == '\0'))
-            {
-                // Found a UART node, look for register properties nearby
-                let start = i.saturating_sub(100);
-                let end = (i + 200).min(data.len());
-                let section = &data[start..end];
-
-                // Look for register addresses (reg property)
-                for (j, reg_window) in section.windows(8).enumerate() {
-                    // Check for potential register base addresses
-                    let addr = u32::from_be_bytes([
-                        reg_window[0],
-                        reg_window[1],
-                        reg_window[2],
-                        reg_window[3],
-                    ]);
-                    let size = u32::from_be_bytes([
-                        reg_window[4],
-                        reg_window[5],
-                        reg_window[6],
-                        reg_window[7],
-                    ]);
-
-                    // Filter for reasonable UART addresses
-                    if (addr >= 0x80000000 && addr < 0x90000000)
-                        || (addr >= 0x3C000000 && addr < 0x40000000)
-                    {
-                        let uart_name = std::str::from_utf8(window)
-                            .unwrap_or("uart?")
-                            .trim_end_matches('\0');
-                        uart_nodes.push(format!(
-                            "{}: Base=0x{:08x}, Size=0x{:x}",
-                            uart_name, addr, size
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // Also search for known UART base addresses directly
-    let known_uart_bases = [
-        (0x82500000u32, "UART0 (Apple A4)"),
-        (0x82500040u32, "UART1 (Apple A4)"),
-        (0x82500080u32, "UART2 (Apple A4)"),
-        (0x825000C0u32, "UART3 (Apple A4)"),
-    ];
-
-    for (base, name) in &known_uart_bases {
-        let base_bytes_be = base.to_be_bytes();
-        let base_bytes_le = base.to_le_bytes();
-
-        for (i, window) in data.windows(4).enumerate() {
-            if window == base_bytes_be || window == base_bytes_le {
-                println!("Found {} at offset 0x{:x}", name, i);
-            }
-        }
-    }
-
-    if uart_nodes.is_empty() {
-        println!("No UART register information found");
-
-        // Fallback: show all UART string references
-        println!("\nUART string references:");
-        for (i, window) in data.windows(10).enumerate() {
-            if let Ok(s) = std::str::from_utf8(window) {
-                if s.contains("uart") || s.contains("UART") {
-                    let clean = s
-                        .chars()
-                        .take_while(|c| c.is_ascii_graphic())
-                        .collect::<String>();
-                    if clean.len() > 3 {
-                        println!("  0x{:x}: {}", i, clean);
-                    }
-                }
-            }
-        }
-    } else {
-        println!("\nUART Register Information:");
-        for node in uart_nodes {
-            println!("  {}", node);
-        }
-    }
-
-    Ok(())
-}
-
 fn parse_node(data: &[u8], offset: &mut usize) -> Result<DeviceTreeNode> {
     if *offset + 8 > data.len() {
         return Err(DeviceTreeError::Parse("Unexpected end of data".to_string()));
@@ -250,6 +150,19 @@ fn parse_node(data: &[u8], offset: &mut usize) -> Result<DeviceTreeNode> {
         data[*offset + 7],
     ]);
     *offset += 8;
+
+    println!(
+        "Node at offset 0x{:x}: {} props, {} children",
+        *offset - 8,
+        num_props,
+        num_children
+    );
+    if num_props > 1000 || num_children > 1000 {
+        return Err(DeviceTreeError::Parse(format!(
+            "Suspicious node counts: props={}, children={}",
+            num_props, num_children
+        )));
+    }
 
     // Read properties
     let mut properties = Vec::new();
@@ -312,63 +225,29 @@ fn parse_node(data: &[u8], offset: &mut usize) -> Result<DeviceTreeNode> {
     })
 }
 
-fn find_uart_nodes(node: &DeviceTreeNode, path: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    let current_path = if path.is_empty() {
-        node.name.clone()
-    } else {
-        format!("{}/{}", path, node.name)
-    };
+fn print_tree(node: &DeviceTreeNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    println!("{}{}", indent, node.name);
 
-    if node.name.contains("uart") || node.name.contains("serial") {
-        let mut info = format!("UART Node: {}", current_path);
-
-        for prop in &node.properties {
-            match prop.name.as_str() {
-                "reg" if prop.value.len() >= 8 => {
-                    let addr = u32::from_be_bytes([
-                        prop.value[0],
-                        prop.value[1],
-                        prop.value[2],
-                        prop.value[3],
-                    ]);
-                    let size = u32::from_be_bytes([
-                        prop.value[4],
-                        prop.value[5],
-                        prop.value[6],
-                        prop.value[7],
-                    ]);
-                    info.push_str(&format!(
-                        "\n  Address: 0x{:08x}, Size: 0x{:08x}",
-                        addr, size
-                    ));
-                }
-                "compatible" => {
-                    let compat = String::from_utf8_lossy(&prop.value)
-                        .trim_end_matches('\0')
-                        .to_string();
-                    info.push_str(&format!("\n  Compatible: {}", compat));
-                }
-                "clock-frequency" if prop.value.len() >= 4 => {
-                    let freq = u32::from_be_bytes([
-                        prop.value[0],
-                        prop.value[1],
-                        prop.value[2],
-                        prop.value[3],
-                    ]);
-                    info.push_str(&format!("\n  Clock: {} Hz", freq));
-                }
-                _ => {}
-            }
+    for prop in &node.properties {
+        if prop.name == "reg" && prop.value.len() >= 8 {
+            let addr =
+                u32::from_be_bytes([prop.value[0], prop.value[1], prop.value[2], prop.value[3]]);
+            let size =
+                u32::from_be_bytes([prop.value[4], prop.value[5], prop.value[6], prop.value[7]]);
+            println!("{}  reg: base=0x{:08x} size=0x{:x}", indent, addr, size);
         }
-        results.push(info);
+        if prop.name == "compatible" {
+            let s = String::from_utf8_lossy(&prop.value)
+                .trim_matches('\0')
+                .to_string();
+            println!("{}  compatible: {}", indent, s);
+        }
     }
 
     for child in &node.children {
-        results.extend(find_uart_nodes(child, &current_path));
+        print_tree(child, depth + 1);
     }
-
-    results
 }
 
 fn main() -> Result<()> {
@@ -391,8 +270,13 @@ fn main() -> Result<()> {
         hex::decode("50208af7c2de617854635fb4fc4eaa8cddab0e9035ea25abf81b0fa8b0b5654f").unwrap();
     let decrypted_data = decrypt_payload(encrypted_data, &key, &iv)?;
 
-    // Extract UART information
-    parse_device_tree(&decrypted_data)?;
+    // Parse the tree structure
+    println!("Parsing Device Tree structure...");
+    let mut offset = 0;
+    let root = parse_node(&decrypted_data, &mut offset)?;
+
+    // Print the full tree
+    print_tree(&root, 0);
 
     Ok(())
 }

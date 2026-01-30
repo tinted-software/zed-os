@@ -3,6 +3,7 @@ use cbc::Decryptor;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use std::fs::File;
 use std::io::Read;
+use std::io::Write;
 use thiserror::Error;
 
 mod cpu;
@@ -199,14 +200,9 @@ fn main() -> Result<()> {
         println!();
     }
 
-    // Decode ARM instructions
-    let instructions = decoder::decode(&decrypted_payload).map_err(EmulatorError::Decoder)?;
-
-    println!("Decoded {} instructions", instructions.len());
-
     // Run CPU emulator
     let mut cpu = ArmCpu::new();
-    let mut hardware = Hardware::new();
+    let hardware = Hardware::new();
     cpu.load_memory(0x80000000, &decrypted_payload);
     cpu.set_hardware(hardware);
     cpu.pc = 0x80000000;
@@ -225,8 +221,15 @@ fn main() -> Result<()> {
     let mut decoded_cache: std::collections::HashMap<u32, decoder::Instruction> =
         std::collections::HashMap::new();
 
-    while step < 20_000_000 {
+    let mut last_watch_val = 0;
+
+    while step < 500_000_000 {
         let pc = cpu.pc;
+
+        if step % 100000 == 0 {
+            // println!("Step {}: PC=0x{:08x}", step, pc);
+            // let _ = std::io::stdout().flush();
+        }
 
         // Ensure instruction is decoded
         if !decoded_cache.contains_key(&pc) {
@@ -245,7 +248,8 @@ fn main() -> Result<()> {
                 break;
             }
 
-            match decoder::decode(&insn_bytes) {
+            let is_thumb = (cpu.cpsr >> 5) & 1 != 0;
+            match decoder::decode(&insn_bytes, is_thumb) {
                 Ok(insns) => {
                     if !insns.is_empty() {
                         decoded_cache.insert(pc, insns[0].clone());
@@ -263,11 +267,20 @@ fn main() -> Result<()> {
 
         let insn = decoded_cache.get(&pc).unwrap().clone();
 
-        if step < 100 || (step > 197420 && step < 197430) {
+        // Trace disabled for speed, enable if needed
+        if false && (step < 100 || (step > 198500 && step < 198700)) {
+            let mut bytes = [0u8; 4];
+            for i in 0..insn.size {
+                bytes[i as usize] = cpu.memory.get(&(cpu.pc + i as u32)).copied().unwrap_or(0);
+            }
             println!(
-                "  {}: PC=0x{:08x} T={} {} (cond: 0x{:x}) {:?}",
+                "  {}: PC=0x{:08x} {:02x}{:02x}{:02x}{:02x} T={} {} (cond: 0x{:x}) {:?}",
                 step,
                 cpu.pc,
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
                 (cpu.cpsr >> 5) & 1,
                 insn.mnemonic,
                 insn.condition,
@@ -282,19 +295,43 @@ fn main() -> Result<()> {
             break;
         }
 
+        // Minimal UART hook via memory watch
+        if let Some(val) = cpu.memory.get(&0x5FFF7F24) {
+            let addr = 0x5FFF7F24;
+            let v0 = *cpu.memory.get(&addr).unwrap_or(&0) as u32;
+            if v0 != last_watch_val && v0 != 0 {
+                if v0 >= 0x20 && v0 <= 0x7E {
+                    print!("{}", v0 as u8 as char);
+                } else if v0 == 0x0a || v0 == 0x0d {
+                    // print!("{}", v0 as u8 as char); // Newline matching
+                    if v0 == 0x0a {
+                        println!();
+                    }
+                }
+                let _ = std::io::stdout().flush();
+                last_watch_val = v0;
+            }
+        }
+
         // Only increment PC if it wasn't changed by the instruction
         if !cpu.pc_modified {
-            cpu.pc += 4;
+            cpu.pc += insn.size as u32;
         }
 
         step += 1;
     }
 
     println!("Final CPU state:");
-    println!("  PC: 0x{:08x}", cpu.pc);
-    println!("  R0: 0x{:08x}", cpu.registers[0]);
-    println!("  R1: 0x{:08x}", cpu.registers[1]);
-    println!("  R2: 0x{:08x}", cpu.registers[2]);
+    cpu.dump_registers();
+
+    println!("Relocated memory dump around failure:");
+    for i in (0x5FF22ED0..0x5FF22F00).step_by(16) {
+        print!("{:08x}: ", i);
+        for j in 0..16 {
+            print!("{:02x} ", cpu.memory.get(&(i + j)).copied().unwrap_or(0));
+        }
+        println!();
+    }
 
     Ok(())
 }

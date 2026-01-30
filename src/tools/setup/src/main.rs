@@ -37,8 +37,10 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
-    /// Setup the OS (fetch IPSW, decrypt, build kernel)
+    /// Setup the OS (fetch IPSW, decryptl)
     Setup(Args),
+    // Build the workspace for the CI
+    Ci,
     /// Run the kernel in QEMU
     Qemu(QemuArgs),
 }
@@ -71,10 +73,6 @@ struct Args {
     /// Disk size in MB
     #[arg(long, default_value_t = 1536)]
     size_mb: u64,
-
-    /// CI mode
-    #[arg(long, default_value = "false")]
-    ci: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -105,16 +103,13 @@ async fn main() -> Result<(), SetupError> {
     match cli.command {
         Commands::Setup(args) => setup(args).await,
         Commands::Qemu(args) => qemu(args),
+        Commands::Ci => ci(),
     }
 }
 
-async fn setup(args: Args) -> Result<(), SetupError> {
-    let mp = MultiProgress::new();
+fn ci() -> Result<(), SetupError> {
     let total_start = Instant::now();
 
-    std::fs::create_dir_all(&args.work_dir)?;
-
-    // cargo build kernel
     if !std::process::Command::new("cargo")
         .arg("build")
         .arg("-Zbuild-std=core,alloc,compiler_builtins")
@@ -138,95 +133,104 @@ async fn setup(args: Args) -> Result<(), SetupError> {
         ));
     }
 
-    if !args.ci {
-        println!(
-            "Fetching firmware URL for {} build {}...",
-            args.device, args.build
-        );
-        let ipsw_url = fetch_firmware_url(&args.device, &args.build)
-            .await
-            .map_err(|e| SetupError::Download(e.to_string()))?
-            .ok_or_else(|| SetupError::Other("Firmware not found".to_string()))?;
+    println!("✨ Done in {:?}", total_start.elapsed());
 
-        // 2. Download IPSW
-        let ipsw_path = args.work_dir.join("firmware.ipsw");
-        if !ipsw_path.exists() {
-            println!("Downloading IPSW...");
-            download_ipsw(&ipsw_url, &ipsw_path, &mp).await?;
-        } else {
-            println!("IPSW already downloaded, skipping.");
+    Ok(())
+}
+
+async fn setup(args: Args) -> Result<(), SetupError> {
+    let mp = MultiProgress::new();
+    let total_start = Instant::now();
+
+    std::fs::create_dir_all(&args.work_dir)?;
+
+    println!(
+        "Fetching firmware URL for {} build {}...",
+        args.device, args.build
+    );
+    let ipsw_url = fetch_firmware_url(&args.device, &args.build)
+        .await
+        .map_err(|e| SetupError::Download(e.to_string()))?
+        .ok_or_else(|| SetupError::Other("Firmware not found".to_string()))?;
+
+    // 2. Download IPSW
+    let ipsw_path = args.work_dir.join("firmware.ipsw");
+    if !ipsw_path.exists() {
+        println!("Downloading IPSW...");
+        download_ipsw(&ipsw_url, &ipsw_path, &mp).await?;
+    } else {
+        println!("IPSW already downloaded, skipping.");
+    }
+
+    // 3. Extract Rootfs DMG (optimized)
+    let rootfs_dmg_encrypted = args.work_dir.join("rootfs_encrypted.dmg");
+    if !rootfs_dmg_encrypted.exists() {
+        println!("Extracting rootfs DMG from IPSW...");
+        let file = File::open(&ipsw_path).map_err(|e| {
+            SetupError::Other(format!(
+                "Failed to open IPSW at {}: {}",
+                ipsw_path.display(),
+                e
+            ))
+        })?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| SetupError::Other(format!("Failed to open IPSW as ZIP: {}", e)))?;
+
+        let mut largest_name = String::new();
+        let mut largest_size = 0;
+        let mut largest_index = 0;
+
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)?;
+            if file.name().ends_with(".dmg") && file.size() > largest_size {
+                largest_size = file.size();
+                largest_name = file.name().to_string();
+                largest_index = i;
+            }
         }
 
-        // 3. Extract Rootfs DMG (optimized)
-        let rootfs_dmg_encrypted = args.work_dir.join("rootfs_encrypted.dmg");
-        if !rootfs_dmg_encrypted.exists() {
-            println!("Extracting rootfs DMG from IPSW...");
-            let file = File::open(&ipsw_path).map_err(|e| {
-                SetupError::Other(format!(
-                    "Failed to open IPSW at {}: {}",
-                    ipsw_path.display(),
-                    e
-                ))
-            })?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|e| SetupError::Other(format!("Failed to open IPSW as ZIP: {}", e)))?;
+        if largest_size == 0 {
+            return Err(SetupError::Other("No DMG found in IPSW".to_string()));
+        }
 
-            let mut largest_name = String::new();
-            let mut largest_size = 0;
-            let mut largest_index = 0;
+        println!(
+            "Extracting {} ({} MB)...",
+            largest_name,
+            largest_size / 1024 / 1024
+        );
+        let mut rootfs_zip = archive.by_index(largest_index)?;
+        let mut output = File::create(&rootfs_dmg_encrypted)?;
 
-            for i in 0..archive.len() {
-                let file = archive.by_index(i)?;
-                if file.name().ends_with(".dmg") && file.size() > largest_size {
-                    largest_size = file.size();
-                    largest_name = file.name().to_string();
-                    largest_index = i;
-                }
-            }
-
-            if largest_size == 0 {
-                return Err(SetupError::Other("No DMG found in IPSW".to_string()));
-            }
-
-            println!(
-                "Extracting {} ({} MB)...",
-                largest_name,
-                largest_size / 1024 / 1024
-            );
-            let mut rootfs_zip = archive.by_index(largest_index)?;
-            let mut output = File::create(&rootfs_dmg_encrypted)?;
-
-            let pb = mp.add(ProgressBar::new(largest_size));
-            pb.set_style(ProgressStyle::default_bar()
+        let pb = mp.add(ProgressBar::new(largest_size));
+        pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
             .unwrap()
             .progress_chars("#>-"));
 
-            let mut buffer = vec![0u8; 1024 * 1024];
-            loop {
-                let n = rootfs_zip.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                output.write_all(&buffer[..n])?;
-                pb.inc(n as u64);
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let n = rootfs_zip.read(&mut buffer)?;
+            if n == 0 {
+                break;
             }
-            pb.finish_with_message("Extraction complete");
-        } else {
-            println!("Rootfs DMG already extracted, skipping.");
+            output.write_all(&buffer[..n])?;
+            pb.inc(n as u64);
         }
+        pb.finish_with_message("Extraction complete");
+    } else {
+        println!("Rootfs DMG already extracted, skipping.");
+    }
 
-        // 4. Decrypt Rootfs DMG
-        let rootfs_dmg = args.work_dir.join("rootfs.dmg");
-        if !rootfs_dmg.exists() {
-            println!("Decrypting rootfs DMG...");
-            let mut input = File::open(&rootfs_dmg_encrypted)?;
-            let mut output = File::create(&rootfs_dmg)?;
-            decrypt(&mut input, &mut output, &args.key)
-                .map_err(|e| SetupError::Decrypt(e.to_string()))?;
-        } else {
-            println!("Rootfs DMG already decrypted, skipping.");
-        }
+    // 4. Decrypt Rootfs DMG
+    let rootfs_dmg = args.work_dir.join("rootfs.dmg");
+    if !rootfs_dmg.exists() {
+        println!("Decrypting rootfs DMG...");
+        let mut input = File::open(&rootfs_dmg_encrypted)?;
+        let mut output = File::create(&rootfs_dmg)?;
+        decrypt(&mut input, &mut output, &args.key)
+            .map_err(|e| SetupError::Decrypt(e.to_string()))?;
+    } else {
+        println!("Rootfs DMG already decrypted, skipping.");
     }
 
     println!("✨ Done in {:?}", total_start.elapsed());
