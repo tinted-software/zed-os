@@ -1,0 +1,14 @@
+[package]
+name = "devicetree"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "devicetree"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+hex = { workspace = true }

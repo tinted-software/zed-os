@@ -1,0 +1,12 @@
+[package]
+name = "emulator"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+cranelift = { version = "0.128.0", features = ["jit", "module", "native"] }
+rasn = "0.5.0"
+thiserror = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+hex = { workspace = true }

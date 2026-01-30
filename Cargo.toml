@@ -9,12 +9,13 @@ members = [
     "src/lib/vfdecrypt",
     "src/lib/ipsw-downloader",
     "src/lib/hfsplus",
-    "src/lib/apple-dmg",
+    "src/lib/apple-dmg", "src/tools/emulator", "src/tools/devicetree",
 ]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
 thiserror = { version = "2.0.18", default-features = false }
@@ -46,6 +47,7 @@ sha1 = "0.10.6"
 pbkdf2 = "0.12.2"
 des = "0.8.1"
 cbc = { version = "0.1.2", features = ["alloc"] }
+hex = "0.4.3"
 cipher = { version = "0.4.4", features = ["block-padding"] }
 indicatif = "0.18.3"
 byteorder = "1.5"

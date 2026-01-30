@@ -69,41 +69,6 @@ struct Args {
     ci: bool,
 }
 
-impl Read for OffsetFile {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.file.read(buf)
-    }
-}
-
-impl Seek for OffsetFile {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let actual_pos = match pos {
-            SeekFrom::Start(s) => SeekFrom::Start(self.offset + s),
-            SeekFrom::Current(c) => SeekFrom::Current(c),
-            SeekFrom::End(e) => SeekFrom::End(e),
-        };
-        let new_pos = self.file.seek(actual_pos)?;
-        Ok(new_pos.saturating_sub(self.offset))
-    }
-}
-
-impl hfsplus::Read for OffsetFile {
-    fn read(&mut self, buf: &mut [u8]) -> hfsplus::Result<usize> {
-        Read::read(self, buf).map_err(|e| hfsplus::Error::InvalidData(e.to_string()))
-    }
-}
-
-impl hfsplus::Seek for OffsetFile {
-    fn seek(&mut self, pos: hfsplus::SeekFrom) -> hfsplus::Result<u64> {
-        let std_pos = match pos {
-            hfsplus::SeekFrom::Start(s) => SeekFrom::Start(s),
-            hfsplus::SeekFrom::Current(c) => SeekFrom::Current(c),
-            hfsplus::SeekFrom::End(e) => SeekFrom::End(e),
-        };
-        Seek::seek(self, std_pos).map_err(|e| hfsplus::Error::InvalidData(e.to_string()))
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), SetupError> {
     let args = Args::parse();
@@ -139,7 +104,6 @@ async fn main() -> Result<(), SetupError> {
             .await
             .map_err(|e| SetupError::Download(e.to_string()))?
             .ok_or_else(|| SetupError::Other("Firmware not found".to_string()))?;
-        println!("  Done in {:?}", start.elapsed());
 
         // 2. Download IPSW
         let ipsw_path = args.work_dir.join("firmware.ipsw");
