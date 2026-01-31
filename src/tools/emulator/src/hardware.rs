@@ -60,9 +60,45 @@ impl Timer {
     }
 }
 
+pub struct Vic;
+
+impl Vic {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn read(&self, offset: u32) -> u32 {
+        // Implement read logic or return default
+        0
+    }
+
+    pub fn write(&mut self, offset: u32, value: u32) {
+        // Log VIC writes for debugging
+        // println!("VIC Write: Offset 0x{:x}, Value 0x{:x}", offset, value);
+    }
+}
+
+pub struct Usb;
+
+impl Usb {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn read(&self, offset: u32) -> u32 {
+        0
+    }
+
+    pub fn write(&mut self, offset: u32, value: u32) {
+        // println!("USB Write: Offset 0x{:x}, Value 0x{:x}", offset, value);
+    }
+}
+
 pub struct Hardware {
     pub uart0: Uart,
     pub timer: Timer,
+    pub vic: Vic,
+    pub usb: Usb,
 }
 
 impl Hardware {
@@ -70,6 +106,8 @@ impl Hardware {
         Self {
             uart0: Uart::new(),
             timer: Timer::new(),
+            vic: Vic::new(),
+            usb: Usb::new(),
         }
     }
 
@@ -89,6 +127,16 @@ impl Hardware {
             return Some(self.timer.read(addr - 0x3C700000));
         }
 
+        // VIC
+        if addr >= 0xBFF00000 && addr <= 0xBFFFFFFF {
+            return Some(self.vic.read(addr - 0xBFF00000));
+        }
+
+        // USB (Guessing range based on typical S5L)
+        if addr >= 0x80080000 && addr <= 0x8009FFFF {
+            return Some(self.usb.read(addr - 0x80080000));
+        }
+
         None
     }
 
@@ -102,6 +150,18 @@ impl Hardware {
         // Timer
         if addr >= 0x3C700000 && addr <= 0x3C700040 {
             self.timer.write(addr - 0x3C700000, value);
+            return true;
+        }
+
+        // VIC
+        if addr >= 0xBFF00000 && addr <= 0xBFFFFFFF {
+            self.vic.write(addr - 0xBFF00000, value);
+            return true;
+        }
+
+        // USB
+        if addr >= 0x80080000 && addr <= 0x8009FFFF {
+            self.usb.write(addr - 0x80080000, value);
             return true;
         }
 

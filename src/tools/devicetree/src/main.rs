@@ -137,13 +137,13 @@ fn parse_node(data: &[u8], offset: &mut usize) -> Result<DeviceTreeNode> {
         return Err(DeviceTreeError::Parse("Unexpected end of data".to_string()));
     }
 
-    let num_props = u32::from_be_bytes([
+    let num_props = u32::from_le_bytes([
         data[*offset],
         data[*offset + 1],
         data[*offset + 2],
         data[*offset + 3],
     ]);
-    let num_children = u32::from_be_bytes([
+    let num_children = u32::from_le_bytes([
         data[*offset + 4],
         data[*offset + 5],
         data[*offset + 6],
@@ -167,35 +167,31 @@ fn parse_node(data: &[u8], offset: &mut usize) -> Result<DeviceTreeNode> {
     // Read properties
     let mut properties = Vec::new();
     for _ in 0..num_props {
-        if *offset + 8 > data.len() {
+        if *offset + 32 + 4 > data.len() {
             break;
         }
 
-        let name_len = u32::from_be_bytes([
+        let name = String::from_utf8_lossy(&data[*offset..*offset + 32])
+            .trim_end_matches('\0')
+            .to_string();
+        *offset += 32;
+
+        let value_len = u32::from_le_bytes([
             data[*offset],
             data[*offset + 1],
             data[*offset + 2],
             data[*offset + 3],
         ]);
-        let value_len = u32::from_be_bytes([
-            data[*offset + 4],
-            data[*offset + 5],
-            data[*offset + 6],
-            data[*offset + 7],
-        ]);
-        *offset += 8;
+        *offset += 4;
 
-        if *offset + name_len as usize + value_len as usize > data.len() {
+        if *offset + value_len as usize > data.len() {
             break;
         }
 
-        let name = String::from_utf8_lossy(&data[*offset..*offset + name_len as usize])
-            .trim_end_matches('\0')
-            .to_string();
-        *offset += name_len as usize;
-
         let value = data[*offset..*offset + value_len as usize].to_vec();
         *offset += value_len as usize;
+        // Align to 4 bytes
+        *offset = (*offset + 3) & !3;
 
         properties.push(DeviceTreeProperty { name, value });
     }
@@ -232,9 +228,9 @@ fn print_tree(node: &DeviceTreeNode, depth: usize) {
     for prop in &node.properties {
         if prop.name == "reg" && prop.value.len() >= 8 {
             let addr =
-                u32::from_be_bytes([prop.value[0], prop.value[1], prop.value[2], prop.value[3]]);
+                u32::from_le_bytes([prop.value[0], prop.value[1], prop.value[2], prop.value[3]]);
             let size =
-                u32::from_be_bytes([prop.value[4], prop.value[5], prop.value[6], prop.value[7]]);
+                u32::from_le_bytes([prop.value[4], prop.value[5], prop.value[6], prop.value[7]]);
             println!("{}  reg: base=0x{:08x} size=0x{:x}", indent, addr, size);
         }
         if prop.name == "compatible" {
@@ -269,6 +265,29 @@ fn main() -> Result<()> {
     let key =
         hex::decode("50208af7c2de617854635fb4fc4eaa8cddab0e9035ea25abf81b0fa8b0b5654f").unwrap();
     let decrypted_data = decrypt_payload(encrypted_data, &key, &iv)?;
+
+    // Hexdump decrypted data
+    println!("Decrypted Data Hexdump (first 256 bytes):");
+    for i in (0..256.min(decrypted_data.len())).step_by(16) {
+        print!("{:04x}: ", i);
+        for j in 0..16 {
+            if i + j < decrypted_data.len() {
+                print!("{:02x} ", decrypted_data[i + j]);
+            }
+        }
+        print!(" |");
+        for j in 0..16 {
+            if i + j < decrypted_data.len() {
+                let c = decrypted_data[i + j];
+                if c >= 0x20 && c <= 0x7E {
+                    print!("{}", c as char);
+                } else {
+                    print!(".");
+                }
+            }
+        }
+        println!("|");
+    }
 
     // Parse the tree structure
     println!("Parsing Device Tree structure...");
