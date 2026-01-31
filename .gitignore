@@ -11,3 +11,4 @@ compile_commands.json
 /result
 /result-*
 src/kernel/src/rust_dyld.bin
+.chat_history.json

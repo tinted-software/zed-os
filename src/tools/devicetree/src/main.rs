@@ -225,6 +225,27 @@ fn print_tree(node: &DeviceTreeNode, depth: usize) {
     let indent = "  ".repeat(depth);
     println!("{}{}", indent, node.name);
 
+    if node.name == "chosen" || node.name == "memory-map" {
+        for prop in &node.properties {
+            println!("{}  prop {}: size={}", indent, prop.name, prop.value.len());
+            if prop.value.len() == 8 {
+                let v1 = u32::from_le_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]);
+                let v2 = u32::from_le_bytes([
+                    prop.value[4],
+                    prop.value[5],
+                    prop.value[6],
+                    prop.value[7],
+                ]);
+                println!("{}    values: 0x{:08x} 0x{:08x}", indent, v1, v2);
+            }
+        }
+    }
+
     for prop in &node.properties {
         if prop.name == "reg" && prop.value.len() >= 8 {
             let addr =

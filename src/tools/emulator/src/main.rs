@@ -11,9 +11,20 @@ mod decoder;
 mod hardware;
 mod img3;
 mod img4;
+mod jit;
 
 use cpu::ArmCpu;
 use hardware::Hardware;
+
+extern "C" fn jit_read_helper(cpu_ptr: *mut ArmCpu, addr: u32) -> u32 {
+    let cpu = unsafe { &mut *cpu_ptr };
+    cpu.read_memory(addr).unwrap_or(0)
+}
+
+extern "C" fn jit_write_helper(cpu_ptr: *mut ArmCpu, addr: u32, val: u32) {
+    let cpu = unsafe { &mut *cpu_ptr };
+    let _ = cpu.write_memory(addr, val);
+}
 
 #[derive(Error, Debug)]
 pub enum EmulatorError {
@@ -135,7 +146,7 @@ fn main() -> Result<()> {
     // Decrypt payload
     let decrypted_payload = decrypt_payload(encrypted_data, &key, &iv)?;
     println!("Successfully decrypted payload");
-
+    std::fs::write("work/Firmware/dfu/iBEC_decrypted.bin", &decrypted_payload).unwrap();
     println!("Payload size: {} bytes", decrypted_payload.len());
 
     // Hexdump start of payload
@@ -200,6 +211,15 @@ fn main() -> Result<()> {
         println!();
     }
 
+    println!("Literal pool dump at 0x80000300:");
+    for i in (0x300..0x340).step_by(16) {
+        print!("{:08x}: ", 0x80000000 + i as u32);
+        for j in 0..16 {
+            print!("{:02x} ", decrypted_payload[i + j]);
+        }
+        println!();
+    }
+
     // Run CPU emulator
     let mut cpu = ArmCpu::new();
     let hardware = Hardware::new();
@@ -221,89 +241,150 @@ fn main() -> Result<()> {
     let mut decoded_cache: std::collections::HashMap<u32, decoder::Instruction> =
         std::collections::HashMap::new();
 
+    let mut jit = jit::Jit::new();
+    let mut block_sizes: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     let mut last_watch_val = 0;
+    let mut compilations = 0;
 
-    while step < 500_000_000 {
+    while step < 10_000_000_000 {
         let pc = cpu.pc;
 
-        if step % 100000 == 0 {
-            // println!("Step {}: PC=0x{:08x}", step, pc);
-            // let _ = std::io::stdout().flush();
+        // 1. Try JIT
+        if let Some(code_ptr) = jit.get_block(pc) {
+            let func: extern "C" fn(
+                *mut ArmCpu,
+                *mut u32,
+                *mut u8,
+                *mut u32,
+                extern "C" fn(*mut ArmCpu, u32) -> u32,
+                extern "C" fn(*mut ArmCpu, u32, u32),
+            ) = unsafe { std::mem::transmute(code_ptr) };
+            func(
+                &mut cpu,
+                cpu.registers.as_mut_ptr(),
+                cpu.ram.as_mut_ptr(),
+                &mut cpu.cpsr,
+                jit_read_helper,
+                jit_write_helper,
+            );
+            cpu.pc = cpu.registers[15];
+            let size = *block_sizes.get(&pc).unwrap_or(&1);
+            step += size;
+            if step % 1000000 < size {
+                eprintln!(
+                    "[Step {}] PC=0x{:08x}, JIT cache: {}",
+                    step, cpu.pc, compilations
+                );
+                eprintln!(
+                    "Registers: R0={:08x} R1={:08x} R2={:08x} R3={:08x} SP={:08x} LR={:08x} CPSR={:08x}",
+                    cpu.registers[0],
+                    cpu.registers[1],
+                    cpu.registers[2],
+                    cpu.registers[3],
+                    cpu.registers[13],
+                    cpu.registers[14],
+                    cpu.cpsr
+                );
+            }
+            continue;
         }
 
-        // Ensure instruction is decoded
-        if !decoded_cache.contains_key(&pc) {
-            let mut insn_bytes = [0u8; 4];
-            let mut all_zero = true;
-            for i in 0..4 {
-                let b = cpu.memory.get(&(pc + i as u32)).copied().unwrap_or(0);
-                if b != 0 {
-                    all_zero = false;
+        // 2. Block discovery and compilation if not in cache
+        let mut block_insns = Vec::new();
+        let mut curr_pc = pc;
+        for _ in 0..100 {
+            // Ensure instruction is decoded
+            if !decoded_cache.contains_key(&curr_pc) {
+                let mut insn_bytes = [0u8; 4];
+                for i in 0..4 {
+                    insn_bytes[i] = cpu.memory.get(&(curr_pc + i as u32)).copied().unwrap_or(0);
                 }
-                insn_bytes[i] = b;
-            }
-
-            if all_zero {
-                println!("  {}: PC at zero memory: 0x{:08x}", step, pc);
-                break;
-            }
-
-            let is_thumb = (cpu.cpsr >> 5) & 1 != 0;
-            match decoder::decode(&insn_bytes, is_thumb) {
-                Ok(insns) => {
+                let is_thumb = (cpu.cpsr >> 5) & 1 != 0;
+                if let Ok(insns) = decoder::decode(&insn_bytes, is_thumb) {
                     if !insns.is_empty() {
-                        decoded_cache.insert(pc, insns[0].clone());
+                        decoded_cache.insert(curr_pc, insns[0].clone());
                     } else {
-                        println!("  {}: Failed to decode at 0x{:08x}", step, pc);
                         break;
                     }
-                }
-                Err(_) => {
-                    println!("  {}: Decoder error at 0x{:08x}", step, pc);
+                } else {
                     break;
                 }
             }
-        }
+            let insn = decoded_cache.get(&curr_pc).unwrap().clone();
+            block_insns.push((curr_pc, insn.clone()));
 
-        let insn = decoded_cache.get(&pc).unwrap().clone();
-
-        // Trace disabled for speed, enable if needed
-        if false && (step < 100 || (step > 198500 && step < 198700)) {
-            let mut bytes = [0u8; 4];
-            for i in 0..insn.size {
-                bytes[i as usize] = cpu.memory.get(&(cpu.pc + i as u32)).copied().unwrap_or(0);
+            // Basic block terminator check
+            let m = insn.mnemonic.as_str();
+            if m == "b"
+                || m == "bl"
+                || m == "bx"
+                || m == "blx"
+                || m == "cbz"
+                || m == "cbnz"
+                || m == "it"
+                || m == "svc"
+                || m == "eret"
+                || m == "pop"
+                || m == "pop.w"
+                || insn
+                    .operands
+                    .iter()
+                    .any(|o| matches!(o, decoder::Operand::Register(15)))
+            {
+                break;
             }
-            println!(
-                "  {}: PC=0x{:08x} {:02x}{:02x}{:02x}{:02x} T={} {} (cond: 0x{:x}) {:?}",
-                step,
-                cpu.pc,
-                bytes[0],
-                bytes[1],
-                bytes[2],
-                bytes[3],
-                (cpu.cpsr >> 5) & 1,
-                insn.mnemonic,
-                insn.condition,
-                insn.operands
-            );
+            curr_pc += insn.size as u32;
         }
 
-        let old_pc = cpu.pc;
-        cpu.pc_modified = false;
-        if let Err(e) = cpu.execute(&insn) {
-            println!("    Error at PC 0x{:08x}: {}", old_pc, e);
+        let is_thumb = (cpu.cpsr >> 5) & 1 != 0;
+        if let Some(code_ptr) = jit.compile_block(pc, &block_insns, is_thumb) {
+            let func: extern "C" fn(
+                *mut ArmCpu,
+                *mut u32,
+                *mut u8,
+                *mut u32,
+                extern "C" fn(*mut ArmCpu, u32) -> u32,
+                extern "C" fn(*mut ArmCpu, u32, u32),
+            ) = unsafe { std::mem::transmute(code_ptr) };
+            func(
+                &mut cpu,
+                cpu.registers.as_mut_ptr(),
+                cpu.ram.as_mut_ptr(),
+                &mut cpu.cpsr,
+                jit_read_helper,
+                jit_write_helper,
+            );
+            cpu.pc = cpu.registers[15];
+            block_sizes.insert(pc, block_insns.len() as u64);
+            step += block_insns.len() as u64;
+            compilations += 1;
+            continue;
+        }
+
+        // 3. Fallback to interpreter
+        if let Some(insn) = decoded_cache.get(&pc) {
+            let insn = insn.clone();
+            let old_pc = cpu.pc;
+            cpu.pc_modified = false;
+            if let Err(e) = cpu.execute(&insn) {
+                println!("    Error at PC 0x{:08x}: {}", old_pc, e);
+                break;
+            }
+            if !cpu.pc_modified {
+                cpu.pc += insn.size as u32;
+            }
+            step += 1;
+        } else {
+            println!("  Failed to decode at 0x{:08x}", pc);
             break;
         }
 
         // Minimal UART hook via memory watch
-        if let Some(val) = cpu.memory.get(&0x5FFF7F24) {
-            let addr = 0x5FFF7F24;
-            let v0 = *cpu.memory.get(&addr).unwrap_or(&0) as u32;
+        if let Ok(v0) = cpu.read_memory(0x5FFF7F24) {
             if v0 != last_watch_val && v0 != 0 {
                 if v0 >= 0x20 && v0 <= 0x7E {
                     print!("{}", v0 as u8 as char);
                 } else if v0 == 0x0a || v0 == 0x0d {
-                    // print!("{}", v0 as u8 as char); // Newline matching
                     if v0 == 0x0a {
                         println!();
                     }
@@ -313,25 +394,15 @@ fn main() -> Result<()> {
             }
         }
 
-        // Only increment PC if it wasn't changed by the instruction
-        if !cpu.pc_modified {
-            cpu.pc += insn.size as u32;
+        if step % 10_000 == 0 {
+            eprintln!(
+                "[Step {}] PC=0x{:08x}, JIT cache: {}",
+                step, cpu.pc, compilations
+            );
         }
-
-        step += 1;
     }
 
     println!("Final CPU state:");
     cpu.dump_registers();
-
-    println!("Relocated memory dump around failure:");
-    for i in (0x5FF22ED0..0x5FF22F00).step_by(16) {
-        print!("{:08x}: ", i);
-        for j in 0..16 {
-            print!("{:02x} ", cpu.memory.get(&(i + j)).copied().unwrap_or(0));
-        }
-        println!();
-    }
-
     Ok(())
 }

@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, CpuError>;
 pub struct ArmCpu {
     pub registers: [u32; 16],
     pub memory: HashMap<u32, u8>,
+    pub ram: Vec<u8>, // 256MB of primary RAM
     pub pc: u32,
     pub cpsr: u32,
     pub hardware: Option<Hardware>,
@@ -30,6 +31,7 @@ impl ArmCpu {
         Self {
             registers: [0; 16],
             memory: HashMap::new(),
+            ram: vec![0u8; 256 * 1024 * 1024],
             pc: 0,
             cpsr: 0,
             hardware: None,
@@ -44,7 +46,19 @@ impl ArmCpu {
 
     pub fn load_memory(&mut self, addr: u32, data: &[u8]) {
         for (i, &byte) in data.iter().enumerate() {
-            self.memory.insert(addr + i as u32, byte);
+            let curr_addr = addr + i as u32;
+            self.memory.insert(curr_addr, byte);
+
+            // Also load into fast RAM if it's in a RAM range
+            // Ranges: 0x40000000..0x48000000 and 0x80000000..0x88000000
+            if (curr_addr >= 0x40000000 && curr_addr < 0x50000000)
+                || (curr_addr >= 0x80000000 && curr_addr < 0x90000000)
+            {
+                let offset = (curr_addr & 0x0FFFFFFF) as usize;
+                if offset < self.ram.len() {
+                    self.ram[offset] = byte;
+                }
+            }
         }
     }
 
@@ -153,7 +167,7 @@ impl ArmCpu {
         ))
     }
 
-    pub fn read_memory(&mut self, addr: u32) -> Result<u32> {
+    pub fn read_memory(&self, addr: u32) -> Result<u32> {
         // NVRAM/Environment variables (common iBEC addresses)
         match addr {
             // NVRAM base addresses - simulate boot environment
@@ -166,21 +180,23 @@ impl ArmCpu {
             0x89000000..=0x89000FFF => return Ok(0x0), // Debug flags
             _ => {}
         }
-
-        // Check hardware peripherals
+        // Check hardware peripherals first
         if let Some(ref hw) = self.hardware {
-            if let Some(value) = hw.read(addr) {
-                return Ok(value);
+            if let Some(val) = hw.read(addr) {
+                return Ok(val);
             }
         }
 
-        // Check if address is within loaded memory range
-        // Check if address is within loaded memory range
-        if !self.memory.contains_key(&addr) {
-            if addr >= 0x80000000 && addr < 0x90000000 {
-                println!("Unmapped Read IO: 0x{:08x}", addr);
-            }
-            return Ok(0);
+        // Fast RAM access (map everything to first 256MB via mask 0x0FFFFFFF)
+        let ram_offset = (addr & 0x0FFFFFFF) as usize;
+        if ram_offset + 3 < self.ram.len() {
+            let val = u32::from_le_bytes([
+                self.ram[ram_offset],
+                self.ram[ram_offset + 1],
+                self.ram[ram_offset + 2],
+                self.ram[ram_offset + 3],
+            ]);
+            return Ok(val);
         }
 
         let mut value = 0u32;
@@ -188,7 +204,6 @@ impl ArmCpu {
             if let Some(&byte) = self.memory.get(&(addr + i)) {
                 value |= (byte as u32) << (i * 8);
             } else {
-                // If any byte is missing, return 0
                 return Ok(0);
             }
         }
@@ -203,8 +218,19 @@ impl ArmCpu {
             }
         }
 
-        if addr > 0x1000 && (addr < 0x80000000 || addr > 0x90000000) {
-            println!("Unmapped Write: 0x{:08x} = 0x{:08x}", addr, value);
+        let ram_offset = (addr & 0x0FFFFFFF) as usize;
+        if ram_offset + 3 < self.ram.len() {
+            let bytes = value.to_le_bytes();
+            self.ram[ram_offset] = bytes[0];
+            self.ram[ram_offset + 1] = bytes[1];
+            self.ram[ram_offset + 2] = bytes[2];
+            self.ram[ram_offset + 3] = bytes[3];
+            return Ok(());
+        }
+
+        // Log unmapped writes outside of RAM/Hardware
+        if addr > 0x1000 {
+            // println!("Unmapped Write: 0x{:08x} = 0x{:08x}", addr, value);
         }
 
         for i in 0..4 {
