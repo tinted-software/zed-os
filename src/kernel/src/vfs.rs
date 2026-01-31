@@ -1,9 +1,10 @@
 //! Simple Virtual Filesystem abstraction
 
-use crate::hfsfs::HfsFs;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use rand_chacha::ChaCha20Rng;
+use rand_core::{RngCore, SeedableRng};
 use spin::Mutex;
 
 static VFS: Mutex<Option<Vfs>> = Mutex::new(None);
@@ -30,8 +31,12 @@ pub trait File: Send + Sync {
     }
 }
 
+pub trait FileSystem: Send + Sync {
+    fn open(&self, path: &str) -> Option<Box<dyn File>>;
+}
+
 pub struct Vfs {
-    hfsfs: Arc<HfsFs>,
+    fs: Arc<dyn FileSystem>,
 }
 
 pub struct FileHandle {
@@ -39,17 +44,15 @@ pub struct FileHandle {
 }
 
 impl Vfs {
-    pub fn new(hfsfs: HfsFs) -> Self {
-        Self {
-            hfsfs: Arc::new(hfsfs),
-        }
+    pub fn new(fs: Box<dyn FileSystem>) -> Self {
+        Self { fs: Arc::from(fs) }
     }
 }
 
-/// Initialize the VFS with an HFS+ filesystem
-pub fn init(hfsfs: HfsFs) {
+/// Initialize the VFS with a filesystem
+pub fn init(fs: Box<dyn FileSystem>) {
     let mut vfs = VFS.lock();
-    *vfs = Some(Vfs::new(hfsfs));
+    *vfs = Some(Vfs::new(fs));
 }
 
 /// Open a file by path
@@ -63,11 +66,8 @@ pub fn open(path: &str) -> Option<FileHandle> {
     let vfs = VFS.lock();
     let vfs = vfs.as_ref()?;
 
-    vfs.hfsfs.open(path).map(|file| FileHandle { file })
+    vfs.fs.open(path).map(|file| FileHandle { file })
 }
-
-use rand_chacha::ChaCha20Rng;
-use rand_core::{RngCore, SeedableRng};
 
 static mut RANDOM_RNG: Option<ChaCha20Rng> = None;
 

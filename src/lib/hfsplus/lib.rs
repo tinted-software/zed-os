@@ -64,6 +64,12 @@ pub trait Read {
     }
 }
 
+impl<R: Read + ?Sized> Read for alloc::boxed::Box<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        (**self).read(buf)
+    }
+}
+
 pub trait Write {
     fn write(&mut self, buf: &[u8]) -> Result<usize>;
     fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
@@ -82,8 +88,20 @@ pub trait Write {
     }
 }
 
+impl<W: Write + ?Sized> Write for alloc::boxed::Box<W> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        (**self).write(buf)
+    }
+}
+
 pub trait Seek {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
+}
+
+impl<S: Seek + ?Sized> Seek for alloc::boxed::Box<S> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        (**self).seek(pos)
+    }
 }
 
 pub trait ReadExt: Read {

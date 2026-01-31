@@ -13,3 +13,6 @@ hashbrown = { workspace = true }
 binrw = { workspace = true }
 spin = { workspace = true }
 zlib-rs = { workspace = true }
+
+[features]
+std = ["unicode-normalization/std"]

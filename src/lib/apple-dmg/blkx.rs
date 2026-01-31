@@ -3,14 +3,22 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use {
-    crate::koly::UdifChecksum,
-    anyhow::Result,
-    byteorder::{BE, ReadBytesExt, WriteBytesExt},
-    std::io::{Read, Write},
-};
 
+extern crate alloc;
+use crate::alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binrw};
+
+use crate::koly::UdifChecksum;
+
+use crate::{DmgError, Result};
+
+#[binrw]
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[br(big, magic = b"mish")]
+#[bw(big, magic = b"mish")]
 pub struct BlkxTable {
     /// currently 1
     pub version: u32,
@@ -18,7 +26,7 @@ pub struct BlkxTable {
     pub sector_number: u64,
     /// number of sectors
     pub sector_count: u64,
-    /// seems to always be 0
+    /// seems always to be 0
     pub data_offset: u64,
     /// seems to be a magic constant for zlib describing the buffer size
     /// required for decompressing a chunk.
@@ -28,6 +36,10 @@ pub struct BlkxTable {
     pub reserved: [u8; 24],
     pub checksum: UdifChecksum,
     /// chunk table
+    #[br(temp)]
+    #[bw(calc = chunks.len() as u32)]
+    num_chunks: u32,
+    #[br(count = num_chunks)]
     pub chunks: Vec<BlkxChunk>,
 }
 
@@ -64,56 +76,27 @@ impl BlkxTable {
         self.chunks.push(chunk);
     }
 
-    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let mut signature = [0; 4];
-        r.read_exact(&mut signature)?;
-        anyhow::ensure!(&signature == b"mish");
-        let version = r.read_u32::<BE>()?;
-        let sector_number = r.read_u64::<BE>()?;
-        let sector_count = r.read_u64::<BE>()?;
-        let data_offset = r.read_u64::<BE>()?;
-        let buffers_needed = r.read_u32::<BE>()?;
-        let block_descriptors = r.read_u32::<BE>()?;
-        let mut reserved = [0; 24];
-        r.read_exact(&mut reserved)?;
-        let checksum = UdifChecksum::read_from(r)?;
-        let num_chunks = r.read_u32::<BE>()?;
-        let mut chunks = Vec::with_capacity(num_chunks as _);
-        for _ in 0..num_chunks {
-            chunks.push(BlkxChunk::read_from(r)?);
-        }
-        Ok(Self {
-            version,
-            sector_number,
-            sector_count,
-            data_offset,
-            buffers_needed,
-            block_descriptors,
-            reserved,
-            checksum,
-            chunks,
+    pub fn read_from<R: binrw::io::Read + binrw::io::Seek>(r: &mut R) -> Result<Self> {
+        r.read_be().map_err(|e| {
+            if let binrw::Error::BadMagic { .. } = &e {
+                DmgError::InvalidSignature {
+                    expected: *b"mish",
+                    found: [0, 0, 0, 0], // Simplified
+                }
+            } else {
+                DmgError::Io(e.to_string())
+            }
         })
     }
 
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(b"mish")?;
-        w.write_u32::<BE>(self.version)?;
-        w.write_u64::<BE>(self.sector_number)?;
-        w.write_u64::<BE>(self.sector_count)?;
-        w.write_u64::<BE>(self.data_offset)?;
-        w.write_u32::<BE>(self.buffers_needed)?;
-        w.write_u32::<BE>(self.block_descriptors)?;
-        w.write_all(&self.reserved)?;
-        self.checksum.write_to(w)?;
-        w.write_u32::<BE>(self.chunks.len() as u32)?;
-        for chunk in &self.chunks {
-            chunk.write_to(w)?;
-        }
-        Ok(())
+    pub fn write_to<W: binrw::io::Write + binrw::io::Seek>(&self, w: &mut W) -> Result<()> {
+        w.write_be(self).map_err(|e| DmgError::Io(e.to_string()))
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, BinRead, BinWrite)]
+#[br(big)]
+#[bw(big)]
 pub struct BlkxChunk {
     /// compression type used for this chunk
     pub r#type: u32,
@@ -157,33 +140,6 @@ impl BlkxChunk {
 
     pub fn term(sector_number: u64, compressed_offset: u64) -> Self {
         Self::new(ChunkType::Term, sector_number, 0, compressed_offset, 0)
-    }
-
-    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let r#type = r.read_u32::<BE>()?;
-        let comment = r.read_u32::<BE>()?;
-        let sector_number = r.read_u64::<BE>()?;
-        let sector_count = r.read_u64::<BE>()?;
-        let compressed_offset = r.read_u64::<BE>()?;
-        let compressed_length = r.read_u64::<BE>()?;
-        Ok(Self {
-            r#type,
-            comment,
-            sector_number,
-            sector_count,
-            compressed_offset,
-            compressed_length,
-        })
-    }
-
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_u32::<BE>(self.r#type)?;
-        w.write_u32::<BE>(self.comment)?;
-        w.write_u64::<BE>(self.sector_number)?;
-        w.write_u64::<BE>(self.sector_count)?;
-        w.write_u64::<BE>(self.compressed_offset)?;
-        w.write_u64::<BE>(self.compressed_length)?;
-        Ok(())
     }
 
     pub fn ty(self) -> Option<ChunkType> {

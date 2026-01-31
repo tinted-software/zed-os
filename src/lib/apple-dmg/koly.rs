@@ -3,13 +3,15 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use {
-    anyhow::Result,
-    byteorder::{BE, ReadBytesExt, WriteBytesExt},
-    std::io::{Read, Seek, SeekFrom, Write},
-};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use crate::alloc::string::ToString;
+use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binrw};
+
+use crate::{DmgError, Result};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, BinRead, BinWrite)]
+#[br(big)]
+#[bw(big)]
 pub struct UdifChecksum {
     pub r#type: u32,
     pub size: u32,
@@ -39,21 +41,6 @@ impl UdifChecksum {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self::new(crc32fast::hash(bytes))
     }
-
-    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let r#type = r.read_u32::<BE>()?;
-        let size = r.read_u32::<BE>()?;
-        let mut data = [0; 128];
-        r.read_exact(&mut data)?;
-        Ok(Self { r#type, size, data })
-    }
-
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_u32::<BE>(self.r#type)?;
-        w.write_u32::<BE>(self.size)?;
-        w.write_all(&self.data)?;
-        Ok(())
-    }
 }
 
 impl From<UdifChecksum> for u32 {
@@ -69,11 +56,15 @@ const KOLY_SIZE: i64 = 512;
 /// DMG trailer describing file content.
 ///
 /// This is the main structure defining a DMG.
+#[binrw]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[br(big, magic = b"koly")]
+#[bw(big, magic = b"koly")]
 pub struct KolyTrailer {
-    // "koly" signature: [u8; 4],
     pub version: u32,
-    //header_size: u32,
+    #[br(temp, assert(header_size == 512))]
+    #[bw(calc = 512)]
+    header_size: u32,
     pub flags: u32,
     pub running_data_fork_offset: u64,
     pub data_fork_offset: u64,
@@ -125,6 +116,7 @@ impl Default for KolyTrailer {
 }
 
 impl KolyTrailer {
+    #[cfg(feature = "std")]
     pub fn new(
         data_fork_length: u64,
         sectors: u64,
@@ -134,7 +126,7 @@ impl KolyTrailer {
         main_digest: u32,
     ) -> Self {
         let mut segment_id = [0; 16];
-        getrandom::fill(&mut segment_id).unwrap();
+        let _ = getrandom::fill(&mut segment_id);
         Self {
             data_fork_length,
             sector_count: sectors,
@@ -150,88 +142,24 @@ impl KolyTrailer {
     /// Construct an instance by reading from a seekable reader.
     ///
     /// The trailer is the final 512 bytes of the seekable stream.
-    pub fn read_from<R: Read + Seek>(r: &mut R) -> Result<Self> {
-        r.seek(SeekFrom::End(-KOLY_SIZE))?;
-
-        let mut signature = [0; 4];
-        r.read_exact(&mut signature)?;
-        anyhow::ensure!(&signature == b"koly");
-        let version = r.read_u32::<BE>()?;
-        let header_size = r.read_u32::<BE>()?;
-        anyhow::ensure!(header_size == 512);
-        let flags = r.read_u32::<BE>()?;
-        let running_data_fork_offset = r.read_u64::<BE>()?;
-        let data_fork_offset = r.read_u64::<BE>()?;
-        let data_fork_length = r.read_u64::<BE>()?;
-        let resource_fork_offset = r.read_u64::<BE>()?;
-        let resource_fork_length = r.read_u64::<BE>()?;
-        let segment_number = r.read_u32::<BE>()?;
-        let segment_count = r.read_u32::<BE>()?;
-        let mut segment_id = [0; 16];
-        r.read_exact(&mut segment_id)?;
-        let data_fork_digest = UdifChecksum::read_from(r)?;
-        let plist_offset = r.read_u64::<BE>()?;
-        let plist_length = r.read_u64::<BE>()?;
-        let mut reserved1 = [0; 64];
-        r.read_exact(&mut reserved1)?;
-        let code_signature_offset = r.read_u64::<BE>()?;
-        let code_signature_size = r.read_u64::<BE>()?;
-        let mut reserved2 = [0; 40];
-        r.read_exact(&mut reserved2)?;
-        let main_digest = UdifChecksum::read_from(r)?;
-        let image_variant = r.read_u32::<BE>()?;
-        let sector_count = r.read_u64::<BE>()?;
-        let mut reserved3 = [0; 12];
-        r.read_exact(&mut reserved3)?;
-        Ok(Self {
-            version,
-            flags,
-            running_data_fork_offset,
-            data_fork_offset,
-            data_fork_length,
-            resource_fork_offset,
-            resource_fork_length,
-            segment_number,
-            segment_count,
-            segment_id,
-            data_fork_digest,
-            plist_offset,
-            plist_length,
-            reserved1,
-            code_signature_offset,
-            code_signature_size,
-            reserved2,
-            main_digest,
-            image_variant,
-            sector_count,
-            reserved3,
+    pub fn read_from<R: binrw::io::Read + binrw::io::Seek>(r: &mut R) -> Result<Self> {
+        r.seek(binrw::io::SeekFrom::End(-KOLY_SIZE))
+            .map_err(|e| DmgError::Io(e.to_string()))?;
+        r.read_be().map_err(|e| {
+            if let binrw::Error::AssertFail { .. } = &e {
+                DmgError::InvalidHeaderSize(0) // Simplified
+            } else if let binrw::Error::BadMagic { .. } = &e {
+                DmgError::InvalidSignature {
+                    expected: *b"koly",
+                    found: [0, 0, 0, 0], // Simplified
+                }
+            } else {
+                DmgError::Io(e.to_string())
+            }
         })
     }
 
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
-        w.write_all(b"koly")?;
-        w.write_u32::<BE>(self.version)?;
-        w.write_u32::<BE>(KOLY_SIZE as u32)?;
-        w.write_u32::<BE>(self.flags)?;
-        w.write_u64::<BE>(self.running_data_fork_offset)?;
-        w.write_u64::<BE>(self.data_fork_offset)?;
-        w.write_u64::<BE>(self.data_fork_length)?;
-        w.write_u64::<BE>(self.resource_fork_offset)?;
-        w.write_u64::<BE>(self.resource_fork_length)?;
-        w.write_u32::<BE>(self.segment_number)?;
-        w.write_u32::<BE>(self.segment_count)?;
-        w.write_all(&self.segment_id)?;
-        self.data_fork_digest.write_to(w)?;
-        w.write_u64::<BE>(self.plist_offset)?;
-        w.write_u64::<BE>(self.plist_length)?;
-        w.write_all(&self.reserved1)?;
-        w.write_u64::<BE>(self.code_signature_offset)?;
-        w.write_u64::<BE>(self.code_signature_size)?;
-        w.write_all(&self.reserved2)?;
-        self.main_digest.write_to(w)?;
-        w.write_u32::<BE>(self.image_variant)?;
-        w.write_u64::<BE>(self.sector_count)?;
-        w.write_all(&self.reserved3)?;
-        Ok(())
+    pub fn write_to<W: binrw::io::Write + binrw::io::Seek>(&self, w: &mut W) -> Result<()> {
+        w.write_be(self).map_err(|e| DmgError::Io(e.to_string()))
     }
 }

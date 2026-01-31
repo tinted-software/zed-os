@@ -8,14 +8,31 @@ path = "lib.rs"
 
 [dependencies]
 hfsplus = { path = "../hfsplus" }
-anyhow = { workspace = true }
-byteorder = { workspace = true }
-crc32fast = { workspace = true }
-fatfs = { workspace = true }
-flate2 = { workspace = true }
-fscommon = { workspace = true }
-getrandom = { workspace = true }
-md5 = { workspace = true }
-plist = { workspace = true }
-serde = { workspace = true }
-serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+binrw = { workspace = true }
+crc32fast = { version = "1.5", default-features = false }
+fatfs = { version = "0.3", optional = true }
+fscommon = { version = "0.1", optional = true }
+getrandom = { version = "0.3", optional = true, default-features = false }
+md5 = { version = "0.8", optional = true, default-features = false }
+serde = { workspace = true, features = ["derive", "alloc"] }
+serde_bytes = { version = "0.11", default-features = false, features = [
+    "alloc",
+] }
+zlib-rs = { workspace = true }
+plist = { workspace = true, optional = true }
+
+[features]
+default = []
+std = [
+    "thiserror/std",
+    "crc32fast/std",
+    "fatfs",
+    "fscommon",
+    "getrandom/std",
+    "md5",
+    "hfsplus/std",
+    "plist",
+    "binrw/std",
+    "serde_bytes/std",
+]

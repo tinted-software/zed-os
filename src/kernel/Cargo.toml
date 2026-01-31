@@ -14,4 +14,6 @@ spin = { workspace = true }
 rand_chacha = { workspace = true }
 rand_core = { workspace = true }
 hfsplus = { path = "../lib/hfsplus" }
-zstd-safe = { workspace = true }
+ruzstd = { workspace = true }
+binrw = { workspace = true }
+apple-dmg = { path = "../lib/apple-dmg" }
