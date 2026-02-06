@@ -1,7 +1,7 @@
+use derive_more::derive::Display;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::slice;
-use thiserror::Error;
 
 use aes::Aes128;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
@@ -12,40 +12,55 @@ use pbkdf2::pbkdf2_hmac;
 use rayon::prelude::*;
 use sha1::Sha1;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum VfDecryptError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Cipher error: {0}")]
+    #[display("IO error: {_0}")]
+    Io(std::io::Error),
+    #[display("Cipher error: {_0}")]
     Cipher(String),
-    #[error("Decryption error: {0}")]
+    #[display("Decryption error: {_0}")]
     Decryption(String),
-    #[error("Password is required")]
+    #[display("Password is required")]
     PasswordRequired,
-    #[error("Unsupported format")]
+    #[display("Unsupported format")]
     UnsupportedFormat,
-    #[error("Unsupported blob encryption key bits: {0}")]
+    #[display("Unsupported blob encryption key bits: {_0}")]
     UnsupportedKeyBits(u32),
-    #[error("Unsupported KDF algorithm: {0}")]
+    #[display("Unsupported KDF algorithm: {_0}")]
     UnsupportedKdfAlgorithm(u32),
-    #[error("Unsupported KDF PRNG algorithm: {0}")]
+    #[display("Unsupported KDF PRNG algorithm: {_0}")]
     UnsupportedKdfPrng(u32),
-    #[error("KDF salt length {0} exceeds buffer size")]
+    #[display("KDF salt length {_0} exceeds buffer size")]
     SaltTooLong(usize),
-    #[error("Header specifies IV size {0} which exceeds buffer size")]
+    #[display("Header specifies IV size {_0} which exceeds buffer size")]
     IvTooLong(usize),
-    #[error("Unsupported blob IV size: {0}. Expected 8 for TDES.")]
+    #[display("Unsupported blob IV size: {_0}. Expected 8 for TDES.")]
     UnsupportedIvSize(usize),
-    #[error("Keyblob size {0} exceeds buffer")]
+    #[display("Keyblob size {_0} exceeds buffer")]
     KeyblobTooLong(usize),
-    #[error("Decrypted key material too short")]
+    #[display("Decrypted key material too short")]
     KeyMaterialTooShort,
-    #[error("Decrypted keyblob too short: {0} bytes, expected at least 32")]
+    #[display("Decrypted keyblob too short: {_0} bytes, expected at least 32")]
     KeyblobTooShort(usize),
-    #[error("Hex decode error: {0}")]
+    #[display("Hex decode error: {_0}")]
     HexDecode(String),
-    #[error("Unknown error: {0}")]
+    #[display("Unknown error: {_0}")]
     Unknown(String),
+}
+
+impl std::error::Error for VfDecryptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VfDecryptError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for VfDecryptError {
+    fn from(err: std::io::Error) -> Self {
+        VfDecryptError::Io(err)
+    }
 }
 
 type Result<T> = core::result::Result<T, VfDecryptError>;

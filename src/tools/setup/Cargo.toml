@@ -1,17 +1,18 @@
 [package]
 name = "gravity-setup"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-apple-dmg = { path = "../../lib/apple-dmg" }
+apple-dmg = { path = "../../lib/apple-dmg", features = ["std"] }
 hfsplus = { path = "../../lib/hfsplus" }
 vfdecrypt = { path = "../../lib/vfdecrypt" }
 ipsw-downloader = { path = "../../lib/ipsw-downloader" }
 reqwest = { workspace = true }
 plist = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
+derive_more = { workspace = true }
+rootcause = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 futures-util = { workspace = true }
 indicatif = { workspace = true }

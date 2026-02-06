@@ -2,7 +2,7 @@
 members = [
     "src/kernel",
     "src/tools/ipsw",
-    "src/tools/gravity-setup",
+    "src/tools/setup",
     "src/tools/linker-wrapper",
     "src/lib/dyld",
     "src/lib/loader",
@@ -10,14 +10,18 @@ members = [
     "src/lib/ipsw-downloader",
     "src/lib/hfsplus",
     "src/lib/apple-dmg",
+    "src/tools/emulator",
+    "src/tools/devicetree",
 ]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
-thiserror = { version = "2.0.18", default-features = false }
+rootcause = { git = "https://github.com/rootcause-rs/rootcause", default-features = false }
+derive_more = { version = "2.1.1", default-features = false, features = ["display", "error", "from"] }
 reqwest = { version = "0.13.1", default-features = false, features = [
     "native-tls",
     "stream",
@@ -33,12 +37,13 @@ goblin = { version = "0.10.4", default-features = false, features = [
 ] }
 linked_list_allocator = "0.10.5"
 spin = "0.10.0"
-plist = "1.8.0"
+plist = { version = "1.8.0", default-features = false, features = ["serde"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false }
-clap = { version = "4.5.55", features = [
+clap = { version = "4.5.57", features = [
     "derive",
     "std",
+    "help",
 ], default-features = false }
 aes = "0.8.4"
 hmac = "0.12.1"
@@ -46,7 +51,8 @@ sha1 = "0.10.6"
 pbkdf2 = "0.12.2"
 des = "0.8.1"
 cbc = { version = "0.1.2", features = ["alloc"] }
-cipher = { version = "0.4.4", features = ["block-padding"] }
+hex = "0.4.3"
+cipher = { version = "0.5.0", features = ["block-padding"] }
 indicatif = "0.18.3"
 byteorder = "1.5"
 bitflags = { version = "2.10.0", default-features = false }
@@ -61,12 +67,11 @@ zip = "=7.3.0-pre1"
 rayon = "1.11"
 futures-util = "0.3"
 unicode-normalization = { version = "0.1", default-features = false }
-anyhow = "1.0"
 fatfs = "0.3"
 fscommon = "0.1"
 md5 = "0.8"
 serde_bytes = "0.11"
-getrandom = "0.3"
+getrandom = "0.4"
 flate2 = "1.1"
 crc32fast = "1.5"
 hashbrown = "0.16"
@@ -75,10 +80,11 @@ binrw = { version = "0.15.0", default-features = false }
 zlib-rs = { version = "0.6.0", default-features = false, features = [
     "__internal-api",
 ] }
-rand_core = { version = "0.9.5", default-features = false }
-rand_chacha = { version = "0.9.0", default-features = false }
+rand_core = { version = "0.10.0", default-features = false }
+rand_chacha = { version = "0.10.0", default-features = false }
 lzma-rust2 = { version = "=0.15.7", default-features = false }
-zstd-safe = { version = "7.2.4", default-features = false }
+ruzstd = { version = "0.8.2", default-features = false }
+gpui = { git = "https://github.com/zortax/zed", branch = "wgpu", default-features = false, features = ["wayland"] }
 
 [profile.dev]
 panic = "abort"

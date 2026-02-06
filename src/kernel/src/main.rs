@@ -54,8 +54,46 @@ pub extern "C" fn kmain() {
     if let Some(blk) = virtio::init() {
         kprintln!("Initializing VFS from disk...");
         let blk_shared = alloc::sync::Arc::new(spin::Mutex::new(blk));
-        let hfsfs = hfsfs::HfsFs::new(blk_shared, 400 * 1024 * 1024);
-        vfs::init(hfsfs);
+
+        let wrapper = block::DeviceWrapper::new(
+            alloc::sync::Arc::clone(&blk_shared) as alloc::sync::Arc<dyn block::BlockReader>,
+            0,
+        );
+        let buffered = block::BufReader::with_capacity(128 * 1024, wrapper);
+
+        let hfsfs = if let Ok(dmg) = apple_dmg::DmgReader::new(buffered) {
+            kprintln!(
+                "Found Apple DMG ({} partitions)",
+                dmg.plist().partitions().len()
+            );
+            let mut hfs_part_idx = None;
+            for (idx, part) in dmg.plist().partitions().iter().enumerate() {
+                if part.name.contains("Apple_HFS")
+                    || part.name.contains("Customer Software")
+                    || part.name.contains("HFS")
+                {
+                    hfs_part_idx = Some(idx);
+                    break;
+                }
+            }
+
+            let idx = hfs_part_idx.unwrap_or(dmg.plist().partitions().len() - 1);
+            kprintln!(
+                "Using partition {} ('{}')",
+                idx,
+                dmg.plist().partitions()[idx].name
+            );
+
+            let part_reader = dmg
+                .into_partition_reader(idx)
+                .expect("Failed to create partition reader");
+            hfsfs::HfsFs::new_from_reader(alloc::boxed::Box::new(part_reader))
+        } else {
+            kprintln!("No DMG found, falling back to raw HFS+ at 400MB");
+            hfsfs::HfsFs::new(blk_shared, 400 * 1024 * 1024)
+        };
+
+        vfs::init(alloc::boxed::Box::new(hfsfs));
         kprintln!("VFS initialized");
         load_and_map_shared_cache();
     } else {
