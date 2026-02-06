@@ -11,6 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use binrw::io::{Read, Seek, SeekFrom};
+use derive_more::derive::Display;
 
 #[cfg(feature = "std")]
 use std::io::{BufReader, BufWriter};
@@ -18,29 +19,35 @@ use std::io::{BufReader, BufWriter};
 #[cfg(feature = "std")]
 use std::path::Path;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Display)]
 pub enum DmgError {
-    #[error("Invalid signature: expected {expected:?}, found {found:?}")]
+    #[display("Invalid signature: expected {expected:?}, found {found:?}")]
     InvalidSignature { expected: [u8; 4], found: [u8; 4] },
-    #[error("Invalid version: {0}")]
+    #[display("Invalid version: {_0}")]
     InvalidVersion(u32),
-    #[error("Invalid header size: {0}")]
+    #[display("Invalid header size: {_0}")]
     InvalidHeaderSize(u32),
-    #[error("IO error: {0}")]
+    #[display("IO error: {_0}")]
     Io(alloc::string::String),
-    #[error("Decompression failed: {0}")]
+    #[display("Decompression failed: {_0}")]
     DecompressionFailed(alloc::string::String),
-    #[error("Compression failed: {0}")]
+    #[display("Compression failed: {_0}")]
     CompressionFailed(alloc::string::String),
-    #[error("Plist error: {0}")]
+    #[display("Plist error: {_0}")]
     PlistError(alloc::string::String),
-    #[error("Unsupported chunk type: {0:?}")]
+    #[display("Unsupported chunk type: {_0:?}")]
     UnsupportedChunkType(u32),
-    #[error("Negative seek")]
+    #[display("Negative seek")]
     NegativeSeek,
-    #[error("Other: {0}")]
+    #[display("Other: {_0}")]
     Other(alloc::string::String),
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for DmgError {}
+
+#[cfg(not(feature = "std"))]
+impl core::error::Error for DmgError {}
 
 pub type Result<T> = core::result::Result<T, DmgError>;
 

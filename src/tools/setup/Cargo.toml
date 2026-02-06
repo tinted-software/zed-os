@@ -11,7 +11,8 @@ ipsw-downloader = { path = "../../lib/ipsw-downloader" }
 reqwest = { workspace = true }
 plist = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
+derive_more = { workspace = true }
+rootcause = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 futures-util = { workspace = true }
 indicatif = { workspace = true }

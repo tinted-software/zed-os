@@ -5,18 +5,33 @@ pub mod elf;
 pub mod macho;
 
 use alloc::string::String;
-use thiserror::Error;
+use derive_more::derive::Display;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Display)]
 pub enum LoaderError {
-    #[error("Parse error: {0}")]
-    ParseError(#[from] goblin::error::Error),
-    #[error("Invalid magic: {0:#x}")]
+    #[display("Parse error: {_0}")]
+    ParseError(goblin::error::Error),
+    #[display("Invalid magic: {_0:#x}")]
     InvalidMagic(u32),
-    #[error("Relocation error: {0}")]
+    #[display("Relocation error: {_0}")]
     RelocationError(&'static str),
-    #[error("Missing symbol: {0}")]
+    #[display("Missing symbol: {_0}")]
     MissingSymbol(String),
+}
+
+impl core::error::Error for LoaderError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            LoaderError::ParseError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<goblin::error::Error> for LoaderError {
+    fn from(err: goblin::error::Error) -> Self {
+        LoaderError::ParseError(err)
+    }
 }
 
 #[derive(Debug)]

@@ -8,7 +8,8 @@ name = "devicetree"
 path = "src/main.rs"
 
 [dependencies]
-thiserror = { workspace = true }
+derive_more = { workspace = true }
+rootcause = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }
 hex = { workspace = true }

@@ -21,12 +21,35 @@ pub struct IPSWList {
     pub versions: Value,
 }
 
-#[derive(thiserror::Error, Debug)]
+use derive_more::derive::Display;
+
+#[derive(Debug, Display)]
 pub enum IPSWError {
-    #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
-    #[error("Plist parsing error: {0}")]
-    Plist(#[from] plist::Error),
+    #[display("Network error: {_0}")]
+    Network(reqwest::Error),
+    #[display("Plist parsing error: {_0}")]
+    Plist(plist::Error),
+}
+
+impl std::error::Error for IPSWError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IPSWError::Network(e) => Some(e),
+            IPSWError::Plist(e) => Some(e),
+        }
+    }
+}
+
+impl From<reqwest::Error> for IPSWError {
+    fn from(err: reqwest::Error) -> Self {
+        IPSWError::Network(err)
+    }
+}
+
+impl From<plist::Error> for IPSWError {
+    fn from(err: plist::Error) -> Self {
+        IPSWError::Plist(err)
+    }
 }
 
 pub async fn get_ipsw_list() -> Result<IPSWList, IPSWError> {

@@ -1,16 +1,18 @@
+use derive_more::derive::Display;
 use rasn::types::{OctetString, Utf8String};
 use rasn::{AsnType, Decode, Decoder, Encode};
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum Img4Error {
-    #[error("ASN.1 parsing error: {0}")]
+    #[display("ASN.1 parsing error: {_0}")]
     Asn1(String),
-    #[error("Invalid IMG4 format: {0}")]
+    #[display("Invalid IMG4 format: {_0}")]
     Format(String),
-    #[error("Missing component: {0}")]
+    #[display("Missing component: {_0}")]
     Missing(String),
 }
+
+impl std::error::Error for Img4Error {}
 
 pub type Img4Result<T> = std::result::Result<T, Img4Error>;
 

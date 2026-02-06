@@ -1,10 +1,11 @@
 use aes::{Aes128, Aes192, Aes256};
 use cbc::Decryptor;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+use derive_more::derive::Display;
+use rootcause::{Report, report};
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
-use thiserror::Error;
 
 mod cpu;
 mod decoder;
@@ -26,23 +27,52 @@ extern "C" fn jit_write_helper(cpu_ptr: *mut ArmCpu, addr: u32, val: u32) {
     let _ = cpu.write_memory(addr, val);
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum EmulatorError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("File not found: {0}")]
+    #[display("I/O error: {_0}")]
+    Io(std::io::Error),
+    #[display("File not found: {_0}")]
     FileNotFound(String),
-    #[error("IMG3 error: {0}")]
-    Img3(#[from] img3::Img3Error),
-    #[error("Decryption error: {0}")]
+    #[display("IMG3 error: {_0}")]
+    Img3(img3::Img3Error),
+    #[display("Decryption error: {_0}")]
     Decryption(String),
-    #[error("Decoder error: {0}")]
+    #[display("Decoder error: {_0}")]
     Decoder(String),
-    #[error("CPU error: {0}")]
-    Cpu(#[from] cpu::CpuError),
+    #[display("CPU error: {_0}")]
+    Cpu(cpu::CpuError),
 }
 
-pub type Result<T> = std::result::Result<T, EmulatorError>;
+impl std::error::Error for EmulatorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EmulatorError::Io(e) => Some(e),
+            EmulatorError::Img3(e) => Some(e),
+            EmulatorError::Cpu(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for EmulatorError {
+    fn from(err: std::io::Error) -> Self {
+        EmulatorError::Io(err)
+    }
+}
+
+impl From<img3::Img3Error> for EmulatorError {
+    fn from(err: img3::Img3Error) -> Self {
+        EmulatorError::Img3(err)
+    }
+}
+
+impl From<cpu::CpuError> for EmulatorError {
+    fn from(err: cpu::CpuError) -> Self {
+        EmulatorError::Cpu(err)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Report<EmulatorError>>;
 
 fn decrypt_payload(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
     let mut buf = data.to_vec();
@@ -50,7 +80,7 @@ fn decrypt_payload(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
     match key.len() {
         16 => {
             let mut cipher = Decryptor::<Aes128>::new_from_slices(key, iv)
-                .map_err(|e| EmulatorError::Decryption(e.to_string()))?;
+                .map_err(|e| report!(EmulatorError::Decryption(e.to_string())))?;
             for chunk in buf.chunks_mut(16) {
                 if chunk.len() == 16 {
                     cipher.decrypt_block_mut(chunk.into());
@@ -59,7 +89,7 @@ fn decrypt_payload(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
         }
         24 => {
             let mut cipher = Decryptor::<Aes192>::new_from_slices(key, iv)
-                .map_err(|e| EmulatorError::Decryption(e.to_string()))?;
+                .map_err(|e| report!(EmulatorError::Decryption(e.to_string())))?;
             for chunk in buf.chunks_mut(16) {
                 if chunk.len() == 16 {
                     cipher.decrypt_block_mut(chunk.into());
@@ -68,7 +98,7 @@ fn decrypt_payload(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
         }
         32 => {
             let mut cipher = Decryptor::<Aes256>::new_from_slices(key, iv)
-                .map_err(|e| EmulatorError::Decryption(e.to_string()))?;
+                .map_err(|e| report!(EmulatorError::Decryption(e.to_string())))?;
             for chunk in buf.chunks_mut(16) {
                 if chunk.len() == 16 {
                     cipher.decrypt_block_mut(chunk.into());
@@ -76,10 +106,10 @@ fn decrypt_payload(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
             }
         }
         _ => {
-            return Err(EmulatorError::Decryption(format!(
+            return Err(report!(EmulatorError::Decryption(format!(
                 "Unsupported key size: {}",
                 key.len()
-            )));
+            ))));
         }
     }
 
@@ -91,15 +121,26 @@ fn main() -> Result<()> {
     println!("==================");
 
     let ibec_path = "work/Firmware/dfu/iBEC.k48ap.RELEASE.dfu";
-    let mut ibec_file =
-        File::open(ibec_path).map_err(|_| EmulatorError::FileNotFound(ibec_path.to_string()))?;
+    let mut ibec_file = File::open(ibec_path).map_err(|e| {
+        report!(EmulatorError::Io(e)).context(EmulatorError::FileNotFound(ibec_path.to_string()))
+    })?;
     let mut ibec_data = Vec::new();
-    ibec_file.read_to_end(&mut ibec_data)?;
+    ibec_file.read_to_end(&mut ibec_data).map_err(|e| {
+        report!(EmulatorError::Io(e)).context(EmulatorError::FileNotFound(format!(
+            "Failed to read {}",
+            ibec_path
+        )))
+    })?;
 
     println!("Loaded {} bytes from {}", ibec_data.len(), ibec_path);
 
     // Parse as IMG3 file
-    let img3 = img3::Img3File::parse(&ibec_data)?;
+    let img3 = img3::Img3File::parse(&ibec_data).map_err(|e| {
+        report!(e).context(EmulatorError::Img3(img3::Img3Error::Format(format!(
+            "Failed to parse IMG3 file: {}",
+            ibec_path
+        ))))
+    })?;
 
     println!("IMG3 Header:");
     let magic = img3.header.magic;
@@ -132,9 +173,11 @@ fn main() -> Result<()> {
     }
 
     // Get encrypted data section
-    let encrypted_data = img3
-        .get_data_section()
-        .ok_or_else(|| EmulatorError::Decoder("DATA section not found".to_string()))?;
+    let encrypted_data = img3.get_data_section().ok_or_else(|| {
+        report!(EmulatorError::Decoder(
+            "DATA section not found in IMG3 file".to_string()
+        ))
+    })?;
 
     println!("Encrypted data size: {} bytes", encrypted_data.len());
 
@@ -144,7 +187,11 @@ fn main() -> Result<()> {
         hex::decode("1ba1f38e6a5b4841c1716c11acae9ee0fb471e50362a3b0dd8d98019f174a2f2").unwrap();
 
     // Decrypt payload
-    let decrypted_payload = decrypt_payload(encrypted_data, &key, &iv)?;
+    let decrypted_payload = decrypt_payload(encrypted_data, &key, &iv).map_err(|e| {
+        e.context(EmulatorError::Decryption(
+            "Failed to decrypt iBEC payload".to_string(),
+        ))
+    })?;
     println!("Successfully decrypted payload");
     std::fs::write("work/Firmware/dfu/iBEC_decrypted.bin", &decrypted_payload).unwrap();
     println!("Payload size: {} bytes", decrypted_payload.len());

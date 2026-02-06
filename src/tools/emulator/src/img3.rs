@@ -1,14 +1,16 @@
-use thiserror::Error;
+use derive_more::derive::Display;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum Img3Error {
-    #[error("Invalid IMG3 format: {0}")]
+    #[display("Invalid IMG3 format: {_0}")]
     Format(String),
-    #[error("Tag not found: {0}")]
+    #[display("Tag not found: {_0}")]
     TagNotFound(String),
-    #[error("Invalid tag data")]
+    #[display("Invalid tag data")]
     InvalidTag,
 }
+
+impl std::error::Error for Img3Error {}
 
 pub type Result<T> = std::result::Result<T, Img3Error>;
 

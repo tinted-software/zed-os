@@ -1,4 +1,3 @@
-use crate::cpu::ArmCpu;
 use crate::decoder::{Instruction, Operand};
 use cranelift::codegen::isa::CallConv;
 use cranelift::jit::{JITBuilder, JITModule};

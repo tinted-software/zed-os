@@ -1,20 +1,35 @@
 use aes::Aes256;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use cbc::Decryptor;
+use derive_more::derive::Display;
 use std::fs::File;
 use std::io::Read;
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum DeviceTreeError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("IMG3 parse error: {0}")]
+    #[display("I/O error: {_0}")]
+    Io(std::io::Error),
+    #[display("IMG3 parse error: {_0}")]
     Img3(String),
-    #[error("Decryption error: {0}")]
+    #[display("Decryption error: {_0}")]
     Decryption(String),
-    #[error("Device tree parse error: {0}")]
+    #[display("Device tree parse error: {_0}")]
     Parse(String),
+}
+
+impl std::error::Error for DeviceTreeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DeviceTreeError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for DeviceTreeError {
+    fn from(err: std::io::Error) -> Self {
+        DeviceTreeError::Io(err)
+    }
 }
 
 type Result<T> = std::result::Result<T, DeviceTreeError>;

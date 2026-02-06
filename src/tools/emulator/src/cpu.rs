@@ -1,17 +1,19 @@
 use crate::decoder::{Instruction, Operand};
 use crate::hardware::Hardware;
+use derive_more::derive::Display;
 use std::collections::HashMap;
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display)]
 pub enum CpuError {
-    #[error("Invalid register: {0}")]
+    #[display("Invalid register: {_0}")]
     InvalidRegister(u8),
-    #[error("Memory access error at 0x{0:x}")]
+    #[display("Memory access error at 0x{_0:x}")]
     MemoryAccess(u32),
-    #[error("Unsupported instruction: {0}")]
+    #[display("Unsupported instruction: {_0}")]
     UnsupportedInstruction(String),
 }
+
+impl std::error::Error for CpuError {}
 
 pub type Result<T> = std::result::Result<T, CpuError>;
 

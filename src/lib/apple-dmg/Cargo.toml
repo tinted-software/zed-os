@@ -8,12 +8,13 @@ path = "lib.rs"
 
 [dependencies]
 hfsplus = { path = "../hfsplus" }
-thiserror = { workspace = true }
+derive_more = { workspace = true }
+rootcause = { workspace = true }
 binrw = { workspace = true }
 crc32fast = { version = "1.5", default-features = false }
 fatfs = { version = "0.3", optional = true }
 fscommon = { version = "0.1", optional = true }
-getrandom = { version = "0.3", optional = true, default-features = false }
+getrandom = { version = "0.4", optional = true, default-features = false }
 md5 = { version = "0.8", optional = true, default-features = false }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_bytes = { version = "0.11", default-features = false, features = [
@@ -25,7 +26,7 @@ plist = { workspace = true, optional = true }
 [features]
 default = []
 std = [
-    "thiserror/std",
+    "derive_more/std",
     "crc32fast/std",
     "fatfs",
     "fscommon",
